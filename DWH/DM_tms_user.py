@@ -1,0 +1,200 @@
+import json
+import pandas as pd
+import random
+from airflow import DAG
+from datetime import datetime, timedelta
+from airflow.operators.python import PythonOperator
+from airflow.providers.mysql.hooks.mysql import MySqlHook
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow_clickhouse_plugin.hooks.clickhouse import ClickHouseHook
+
+SOURCE_CONN_ID = "clickhouse_dwh_mitratel"
+SOURCE_DATABASE = "dwh_tms"
+SOURCE_TABLE = "dim_alluser"
+TARGET_CONN_ID = "db_datamart_mitratel"
+TARGET_DATABASE = "datamart"
+TARGET_TABLE = "mart_tms_user"
+FILE_PATH = "/tmp/debug_DM_tms_user.json"
+DAG_ID = "DM_tms_user"
+DAG_INTERVAL = "5-59/15 * * * *"
+CHUNK_SIZE = 5000
+LOG_CONN_ID = "airflow_logs_mitratel"
+LOG_TABLE = "airflow_logs"
+LOG_TYPE = "truncate"
+LOG_KATEGORI = "Data Mart"
+
+EXTRACT_QUERY = """
+SELECT
+    email, enabled, full_name, 
+    mobile_no, creation, last_login, 
+    company_name, module_profile,
+    role_profile_name, role_detail, role_unit, 
+    role_unit AS role_unit_clean, position, 
+    territory, customer, customer_group 
+FROM dwh_tms.dim_alluser FINAL
+WHERE (email like '%@mitratel.co.id' OR email like '%@persadasokkatama.com')
+"""
+
+SOURCE_COLUMNS=['email', 'enabled', 'full_name',
+                'mobile_no', 'creation', 'last_login', 
+                'company_name', 'module_profile',
+                'role_profile_name', 'role_detail', 'role_unit', 
+                'role_unit_clean', 'position', 
+                'territory', 'customer', 'customer_group']
+
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'start_date': datetime(2024, 2, 1, 0, 0),
+    # 'retries': 1,
+    # 'retry_delay': timedelta(minutes=5),
+}
+
+dag = DAG(
+    dag_id=DAG_ID,
+    schedule_interval= DAG_INTERVAL,
+    default_args=default_args,
+    catchup=False
+)
+    
+def log_status(process_name, mark, status, error_message=None):
+    """Insert or update the log table."""
+    pg_hook = PostgresHook(postgres_conn_id=LOG_CONN_ID)
+    conn = pg_hook.get_conn()
+    cursor = conn.cursor()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    dag_name = f"{TARGET_DATABASE}.{TARGET_TABLE}"
+    
+    if status == "pending":
+        cursor.execute(
+            f"""
+            INSERT INTO {LOG_TABLE} (process_name, dag_name, type, status, start_time, mark, kategori)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (process_name, dag_name, LOG_TYPE, status, now, mark, LOG_KATEGORI)
+        )
+    else:
+        cursor.execute(
+            f"""
+            UPDATE {LOG_TABLE} SET status = %s, end_time = %s, error_message = %s
+            WHERE process_name = %s AND status = 'pending' AND dag_name = %s AND mark = %s AND kategori = %s
+            """, (status, now, error_message, process_name, dag_name, mark, LOG_KATEGORI)
+        )
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+def extract_from_clickhouse(**kwargs):
+    """Extract data from ClickHouse and store it as a DataFrame."""
+    random_value = random.randint(1000, 9999)  # Angka acak 4 digit
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")  # Format YYYYMMDDHHMMSS
+    RANDOM_VALUE = f"{random_value}_{timestamp}"
+    process_name = "extract_clickhouse"
+    log_status(process_name, RANDOM_VALUE, "pending")
+
+    try:
+        clickhouse_hook = ClickHouseHook(clickhouse_conn_id=SOURCE_CONN_ID)
+        conn = clickhouse_hook.get_conn()
+        data = conn.execute(EXTRACT_QUERY)
+        
+        processed_data = []
+        for row in data:
+            row = list(row)
+            role_unit_clean = row[10].replace("- Mitratel", "").strip() if row[10] else None  # Index 10 = role_unit
+            row[11] = role_unit_clean  # Update role_unit_clean
+            processed_data.append(tuple(row))
+
+        df = pd.DataFrame(processed_data, columns=SOURCE_COLUMNS).astype(str)
+
+        df.to_json(FILE_PATH, orient="records", default_handler=str)
+
+        kwargs['ti'].xcom_push(key="file_path", value=FILE_PATH)
+        kwargs['ti'].xcom_push(key="random_value", value=RANDOM_VALUE)
+        log_status(process_name, RANDOM_VALUE, "success")
+    except Exception as e:
+        log_status(process_name, RANDOM_VALUE, "failed", str(e))
+        raise
+
+def load_to_postgres(**kwargs):
+    """Load extracted data into Postgres."""
+    random_value = kwargs['ti'].xcom_pull(task_ids="extract_clickhouse", key="random_value")
+    process_name = "load_postgres"
+    log_status(process_name, random_value, "pending")
+
+    try:
+        ti = kwargs['ti']
+        file_path = ti.xcom_pull(task_ids="extract_clickhouse", key="file_path")
+    
+        if not file_path:
+            raise ValueError("No file path received from ClickHouse extraction.")
+    
+        with open(file_path, "r") as f:
+            data_dict = json.load(f)
+
+        df = pd.DataFrame(data_dict, dtype=str)  
+        df = df.applymap(lambda x: x.replace("\\", "") if isinstance(x, str) else x)
+        df = df.applymap(lambda x: x.replace("'", "\\'") if isinstance(x, str) else x)
+        df = df.replace({'': None, 'None': None})
+
+        hook = PostgresHook(postgres_conn_id=TARGET_CONN_ID)
+        conn = hook.get_conn()
+        cursor = conn.cursor()
+
+        insert_query = """
+        INSERT INTO public.mart_tms_user (
+            email, enabled, full_name, mobile_no, creation, last_login, company_name, module_profile,
+            role_profile_name, role_detail, role_unit, role_unit_clean, position, territory, customer, customer_group
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (email) DO UPDATE 
+        SET 
+            enabled = EXCLUDED.enabled,
+            full_name = EXCLUDED.full_name,
+            mobile_no = EXCLUDED.mobile_no,
+            creation = EXCLUDED.creation,
+            last_login = EXCLUDED.last_login,
+            company_name = EXCLUDED.company_name,
+            module_profile = EXCLUDED.module_profile,
+            role_profile_name = EXCLUDED.role_profile_name,
+            role_detail = EXCLUDED.role_detail,
+            role_unit = EXCLUDED.role_unit,
+            role_unit_clean = EXCLUDED.role_unit_clean,
+            position = EXCLUDED.position,
+            territory = EXCLUDED.territory,
+            customer = EXCLUDED.customer,
+            customer_group = EXCLUDED.customer_group,
+            updated_at = NOW() + INTERVAL '7 hours'
+        """
+
+        for __, row in df.iterrows():
+            cursor.execute(insert_query, (row['email'], row['enabled'], row['full_name'], 
+                                               row['mobile_no'], row['creation'], 
+                                               row['last_login'], row['company_name'],
+                                               row['module_profile'], row['role_profile_name'], row['role_detail'], 
+                                               row['role_unit'], row['role_unit_clean'], 
+                                               row['position'], row['territory'],
+                                               row['customer'], row['customer_group']
+                                               ))
+        conn.commit()
+        
+        log_status(process_name, random_value, "success")
+    except Exception as e:
+        log_status(process_name, random_value, "failed", str(e))
+        raise
+
+extract_clickhouse = PythonOperator(
+    task_id="extract_clickhouse",
+    python_callable=extract_from_clickhouse,
+    do_xcom_push=False,
+    dag=dag,
+)
+
+load_postgres = PythonOperator(
+    task_id="load_postgres",
+    python_callable=load_to_postgres,
+    do_xcom_push=False,
+    provide_context=True,
+    dag=dag,
+)
+
+extract_clickhouse >> load_postgres

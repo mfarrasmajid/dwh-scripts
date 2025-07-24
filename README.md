@@ -4,8 +4,8 @@ Penggunaan Datawarehouse di mitratel menggunakan AirFlow Apache, Debezium, Kafka
 
 Berikut link aplikasi datawarehouse:
 
-1. CH-UI (Clickhouse UI): [CH-UI](http://dwhapps.mitratel.co.id/5521)
-2. Apache AirFlow : [AirFlow](http://dwhapps.mitratel.co.id/8080/home)
+1. CH-UI (Clickhouse UI): [CH-UI](http://dwhapps.mitratel.co.id:5521)
+2. Apache AirFlow : [AirFlow](http://dwhapps.mitratel.co.id:8080/home)
 3. DHW Monitoring: [Monitoring](https://dwhapps.mitratel.co.id/)
 4. Kafka: Background Service
 5. Debezium: Background Service

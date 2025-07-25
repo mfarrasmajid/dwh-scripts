@@ -33,7 +33,7 @@ CLICKHOUSE_DATABASE = "sap"
 CLICKHOUSE_TABLE = "aufk"
 LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
-LOG_TYPE = "delta and skip"
+LOG_TYPE = "delta and skip compress"
 LOG_KATEGORI = "Data Lake"
 INSERT_QUERY = """
                     INSERT INTO `sap`.`aufk`

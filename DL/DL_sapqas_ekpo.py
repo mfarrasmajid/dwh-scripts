@@ -5,6 +5,7 @@ from airflow.operators.python import PythonOperator, BranchPythonOperator
 from datetime import datetime, timedelta
 import requests
 import os
+import gzip
 import glob
 from lxml import etree
 from requests.auth import HTTPBasicAuth
@@ -15,29 +16,29 @@ import urllib.parse
 from airflow.models import Variable
 
 # Constants
-BASE_URL = 'http://dmterpprd2.mitratel.co.id:8031/sap/opu/odata/sap/ZCDC_EKPO_1_SRV/FactsOfZCDCEKPO?sap-client=300'
-DELTA_DISCOVERY_URL = 'http://dmterpprd2.mitratel.co.id:8031/sap/opu/odata/sap/ZCDC_EKPO_1_SRV/DeltaLinksOfFactsOfZCDCEKPO?sap-client=300'
-NEXT_URL = 'http://dmterpprd2.mitratel.co.id:8031/sap/opu/odata/sap/ZCDC_EKPO_1_SRV/'
+BASE_URL = 'http://dmterpqas.mitratel.co.id:8021/sap/opu/odata/sap/ZCDC_EKPO_1_SRV/FactsOfZCDCEKPO?sap-client=200'
+DELTA_DISCOVERY_URL = 'http://dmterpqas.mitratel.co.id:8021/sap/opu/odata/sap/ZCDC_EKPO_1_SRV/DeltaLinksOfFactsOfZCDCEKPO?sap-client=200'
+NEXT_URL = 'http://dmterpqas.mitratel.co.id:8021/sap/opu/odata/sap/ZCDC_EKPO_1_SRV/'
 HEADERS = {
-    'Accept-Encoding': 'gzip',
-    'Prefer': 'odata.track-changes,odata.maxpagesize=20000'
+    'Prefer': 'odata.track-changes,odata.maxpagesize=5000',
+    'Accept-Encoding': 'gzip'
 }
-USERNAME = Variable.get("sap_user_prod")
-PASSWORD = Variable.get("sap_pass_prod")
-DELTA_LINK_PATH = '/tmp/sap_ekpo_delta_link.txt'
-SKIP_TOKEN_PATH = '/tmp/sap_ekpo_skip_token.txt'
-XML_DIR = '/tmp/sap_ekpo'
-DAG_ID = "DL_sap_ekpo"
-DAG_INTERVAL = "*/3 0-7,10-23 * * *"
+USERNAME = Variable.get("sap_user_qas")
+PASSWORD = Variable.get("sap_pass_qas")
+DELTA_LINK_PATH = '/tmp/sapqas_ekpo_delta_link.txt'
+SKIP_TOKEN_PATH = '/tmp/sapqas_ekpo_skip_token.txt'
+XML_DIR = '/tmp/sapqas_ekpo'
+DAG_ID = "DL_sapqas_ekpo"
+DAG_INTERVAL = "3-59/5 17-22 * * *"
 CLICKHOUSE_CONN_ID = "clickhouse_mitratel"
-CLICKHOUSE_DATABASE = "sap"
+CLICKHOUSE_DATABASE = "sapqas"
 CLICKHOUSE_TABLE = "ekpo"
 LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
 LOG_TYPE = "delta and skip compress"
 LOG_KATEGORI = "Data Lake"
 INSERT_QUERY = """
-                    INSERT INTO `sap`.`ekpo`
+                    INSERT INTO `sapqas`.`ekpo`
                     (`EBELN`,`EBELP`,`UNIQUEID`,`LOEKZ`,`STATU`,`AEDAT`,`TXZ01`,`MATNR`,`EMATN`,`BUKRS`,`WERKS`,
                     `LGORT`,`BEDNR`,`MATKL`,`INFNR`,`IDNLF`,`KTMNG`,`MENGE`,`MEINS`,`BPRME`,`BPUMZ`,`BPUMN`,
                     `UMREZ`,`UMREN`,`NETPR`,`PEINH`,`NETWR`,`BRTWR`,`AGDAT`,`WEBAZ`,`MWSKZ`,`TXDATFROM`,`TXDAT`,
@@ -148,7 +149,7 @@ INSERT_QUERY = """
                     %(ODQ_ENTITYCNTR)s)
                 """
 INSERT_QUERY_2 = """
-                    INSERT INTO `sap`.`ekpo`
+                    INSERT INTO `sapqas`.`ekpo`
                     (`EBELN`,`EBELP`,`UNIQUEID`,`LOEKZ`,`STATU`,`AEDAT`,`TXZ01`,`MATNR`,`EMATN`,`BUKRS`,`WERKS`,
                     `LGORT`,`BEDNR`,`MATKL`,`INFNR`,`IDNLF`,`KTMNG`,`MENGE`,`MEINS`,`BPRME`,`BPUMZ`,`BPUMN`,
                     `UMREZ`,`UMREN`,`NETPR`,`PEINH`,`NETWR`,`BRTWR`,`AGDAT`,`WEBAZ`,`MWSKZ`,`TXDATFROM`,`TXDAT`,
@@ -201,7 +202,7 @@ INSERT_QUERY_2 = """
 os.makedirs(XML_DIR, exist_ok=True)
 
 def sanitize_record(record):
-    for key in ['EBELN', 'EBELP']:
+    for key in ['EBELN', 'EBELP', 'UNIQUEID']:
         record[key] = record.get(key) or ''
     return record
 
@@ -307,7 +308,7 @@ def fetch_sap_cdc_initial(**kwargs):
             skiptoken = qs.get('$skiptoken', [None])[0]
             if skiptoken:
                 # Rebuild the skiptoken URL part
-                skiptoken_url = f"FactsOfZCDCEKPO?sap-client=300&$skiptoken={skiptoken}"
+                skiptoken_url = f"FactsOfZCDCEKPO?sap-client=200&$skiptoken={skiptoken}"
                 with open(SKIP_TOKEN_PATH, "w") as f:
                     f.write(skiptoken_url)
             else:
@@ -373,7 +374,7 @@ def store_initial_delta_link(**kwargs):
 
                 # Write both parts to file
                 with open(DELTA_LINK_PATH, 'w') as f:
-                    f.write(f"{changes_after_href}?sap-client=300&!deltatoken='{delta_token}'")
+                    f.write(f"{changes_after_href}?sap-client=200&!deltatoken='{delta_token}'")
 
             log_status(process_name, random_value, "success")
         except Exception as e:
@@ -502,7 +503,8 @@ def load_to_clickhouse(**kwargs):
             if r['ODQ_CHANGEMODE'] == 'D':
                 ebeln = r['EBELN']
                 ebelp = r['EBELP']
-                DELETE_QUERY =  f"ALTER TABLE `sap`.`ekpo` DELETE WHERE EBELN = '{ebeln}' AND EBELP = '{ebelp}'"
+                uniqueid = r['UNIQUEID']
+                DELETE_QUERY =  f"ALTER TABLE `sapqas`.`ekpo` DELETE WHERE EBELN = '{ebeln}' AND EBELP = '{ebelp}' AND UNIQUEID = '{uniqueid}'"
                 client.execute(DELETE_QUERY)
             else:
                 client.execute(INSERT_QUERY, r)

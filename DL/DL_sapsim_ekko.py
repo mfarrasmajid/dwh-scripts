@@ -33,7 +33,7 @@ CLICKHOUSE_DATABASE = "sapsim"
 CLICKHOUSE_TABLE = "ekko"
 LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
-LOG_TYPE = "delta and skip"
+LOG_TYPE = "delta and skip compress"
 LOG_KATEGORI = "Data Lake"
 INSERT_QUERY = """
                     INSERT INTO `sapsim`.`ekko`

@@ -17,7 +17,7 @@ TARGET_DATABASE = "datamart"
 TARGET_TABLE = "mart_om_maintenanceorder"
 FILE_PATH = "/tmp/batch_DM_tabmaintenanceorder_"
 DAG_ID = "DM_om_maintenanceorder"
-DAG_INTERVAL = "8-59/10 * * * *"
+DAG_INTERVAL = "4-59/5 * * * *"
 CHUNK_SIZE = 5000
 BATCH_SIZE = 10000
 BATCH_NO = 9
@@ -79,7 +79,15 @@ COLUMNS = [
 	"bapp_number",
 	"bast_number",
 	"gr_status",
-	"customer"]
+	"customer",
+    "end_date",
+    "return_notes", 
+    "fullname_engineer",
+    "ts_approved_vendor",
+    "ts_need_assign",
+    "ts_approved_sm",
+    "ts_expired"
+    ]
 
 default_args = {
     'owner': 'airflow',

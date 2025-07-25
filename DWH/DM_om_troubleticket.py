@@ -17,7 +17,7 @@ TARGET_DATABASE = "datamart"
 TARGET_TABLE = "mart_om_troubleticketcomp"
 FILE_PATH = "/tmp/batch_DM_tabtroubleticketcomp_"
 DAG_ID = "DM_om_troubleticket"
-DAG_INTERVAL = "7-59/10 * * * *"
+DAG_INTERVAL = "4-59/5 * * * *"
 CHUNK_SIZE = 5000
 BATCH_SIZE = 10000
 BATCH_NO = 9
@@ -32,8 +32,20 @@ COLUMNS = [
     "pid", "priority", "disctrict_city", "region", "tt_description", "ts_open", "ts_need_assign",
     "ts_on_progress", "ts_pickup", "ts_departure", "ts_arrived", "ts_resolved", "ts_closed",
     "pic", "detail_issue_type", "issue_type", "reference", "tower_name", "tower_owner",
-    "actual_category", "closed_by", "sla_status", "mttr_hours"
-]
+    "actual_category", "closed_by", "sla_status", "mttr_hours",
+    "aging",
+    "portofolio",
+    "area",
+    "address",
+    "tenant_id",
+    "sid_tenant",
+    "tanggal_request_ant",
+    "service_level_agreement",
+    "agreement_status",
+    "tt_id_ampuhc",
+    "class_of_service",
+    "maintenance_zone",
+    "mttr" ]
 
 default_args = {
     'owner': 'airflow',

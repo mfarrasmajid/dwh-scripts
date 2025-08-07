@@ -20,7 +20,7 @@ DELTA_DISCOVERY_URL = 'http://dmterpprd2.mitratel.co.id:8031/sap/opu/odata/sap/Z
 NEXT_URL = 'http://dmterpprd2.mitratel.co.id:8031/sap/opu/odata/sap/ZCDC_EKPO_1_SRV/'
 HEADERS = {
     'Accept-Encoding': 'gzip',
-    'Prefer': 'odata.track-changes,odata.maxpagesize=20000'
+    'Prefer': 'odata.track-changes,odata.maxpagesize=10000'
 }
 USERNAME = Variable.get("sap_user_prod")
 PASSWORD = Variable.get("sap_pass_prod")
@@ -28,7 +28,7 @@ DELTA_LINK_PATH = '/tmp/sap_ekpo_delta_link.txt'
 SKIP_TOKEN_PATH = '/tmp/sap_ekpo_skip_token.txt'
 XML_DIR = '/tmp/sap_ekpo'
 DAG_ID = "DL_sap_ekpo"
-DAG_INTERVAL = "*/3 0-7,10-23 * * *"
+DAG_INTERVAL = "*/3 0-2,4-23 * * *"
 CLICKHOUSE_CONN_ID = "clickhouse_mitratel"
 CLICKHOUSE_DATABASE = "sap"
 CLICKHOUSE_TABLE = "ekpo"

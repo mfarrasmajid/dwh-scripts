@@ -38,7 +38,8 @@ CLICKHOUSE_TABLE = "afko"
 LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
 LOG_TYPE = "delta and skip compress"
-LOG_KATEGORI = "Data Lake"
+LOG_KATEGORI = "Data Lake" 
+TAGS = ["dl", "sap", "afko"]
 INSERT_QUERY = """
                     INSERT INTO `sap`.`afko`
                     (`AUFNR`,`GLTRP`,`GSTRP`,`FTRMS`,`GLTRS`,`GSTRS`,`GSTRI`,`GETRI`,`GLTRI`,`FTRMI`,
@@ -423,7 +424,7 @@ with DAG(
     dag_id=DAG_ID,
     start_date=datetime(2024, 1, 1),
     schedule_interval= DAG_INTERVAL,
-    catchup=False,
+    catchup=False, tags=TAGS,
     default_args={
         'owner': 'airflow', 
         # 'retries': 1, 

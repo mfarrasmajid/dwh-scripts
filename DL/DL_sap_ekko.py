@@ -34,7 +34,8 @@ CLICKHOUSE_TABLE = "ekko"
 LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
 LOG_TYPE = "delta and skip compress"
-LOG_KATEGORI = "Data Lake"
+LOG_KATEGORI = "Data Lake" 
+TAGS = ["dl", "sap", "ekko"]
 INSERT_QUERY = """
                     INSERT INTO `sap`.`ekko`
                     (`EBELN`,`BUKRS`,`BSTYP`,`BSART`,`BSAKZ`,`LOEKZ`,`STATU`,`AEDAT`,`ERNAM`,
@@ -433,7 +434,7 @@ with DAG(
     dag_id=DAG_ID,
     start_date=datetime(2024, 1, 1),
     schedule_interval= DAG_INTERVAL,
-    catchup=False,
+    catchup=False, tags=TAGS,
     default_args={
         'owner': 'airflow', 
         # 'retries': 1, 

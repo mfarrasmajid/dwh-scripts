@@ -25,6 +25,7 @@ LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
 LOG_TYPE = "truncate"
 LOG_KATEGORI = "Data Mart"
+TAGS = ["dm", "om", "troubleticketcomp"]
 
 COLUMNS = [
     "name", "creation", "modified", "modified_by", "owner", "docstatus", "parent", "parentfield",
@@ -59,7 +60,7 @@ dag = DAG(
     dag_id=DAG_ID,
     schedule_interval= DAG_INTERVAL,
     default_args=default_args,
-    catchup=False
+    catchup=False, tags=TAGS
 )
     
 def log_status(process_name, mark, status, error_message=None):

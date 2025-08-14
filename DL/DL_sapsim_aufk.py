@@ -34,7 +34,8 @@ CLICKHOUSE_TABLE = "aufk"
 LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
 LOG_TYPE = "delta and skip compress"
-LOG_KATEGORI = "Data Lake"
+LOG_KATEGORI = "Data Lake" 
+TAGS = ["dl", "sapsim", "aufk"]
 INSERT_QUERY = """
                     INSERT INTO `sapsim`.`aufk`
                     (`AUFNR`,`AUART`,`AUTYP`,`REFNR`,`ERNAM`,`ERDAT`,`AENAM`,`AEDAT`,`KTEXT`,   
@@ -399,7 +400,7 @@ with DAG(
     dag_id=DAG_ID,
     start_date=datetime(2024, 1, 1),
     schedule_interval= DAG_INTERVAL,
-    catchup=False,
+    catchup=False, tags=TAGS,
     default_args={
         'owner': 'airflow', 
         # 'retries': 1, 

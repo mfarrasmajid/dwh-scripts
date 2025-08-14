@@ -21,7 +21,8 @@ CHUNK_SIZE = 5000
 LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
 LOG_TYPE = "truncate"
-LOG_KATEGORI = "Data Lake"
+LOG_KATEGORI = "Data Lake" 
+TAGS = ["dl", "sap", "tabsite"]
 
 default_args = {
     'owner': 'airflow',
@@ -35,7 +36,7 @@ dag = DAG(
     dag_id=DAG_ID,
     schedule_interval= DAG_INTERVAL,
     default_args=default_args,
-    catchup=False
+    catchup=False, tags=TAGS
 )
     
 def log_status(process_name, mark, status, error_message=None):

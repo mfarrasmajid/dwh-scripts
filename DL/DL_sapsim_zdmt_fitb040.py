@@ -36,7 +36,8 @@ CLICKHOUSE_TABLE = "zdmt_fitb040"
 LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
 LOG_TYPE = "delta"
-LOG_KATEGORI = "Data Lake"
+LOG_KATEGORI = "Data Lake" 
+TAGS = ["dl", "sapsim", "zdmt_fitb040"]
 # INSERT_QUERY = """
 #                     INSERT INTO `sapsim`.`zdmt_fitb040`
 #                     (
@@ -375,7 +376,7 @@ with DAG(
     dag_id=DAG_ID,
     start_date=datetime(2024, 1, 1),
     schedule_interval= DAG_INTERVAL,
-    catchup=False,
+    catchup=False, tags=TAGS,
     default_args={
         'owner': 'airflow', 
         # 'retries': 1, 

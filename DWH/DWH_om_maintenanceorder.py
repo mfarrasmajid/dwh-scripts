@@ -15,7 +15,7 @@ SOURCE_TABLE = "tabmaintenanceorder"
 TARGET_CONN_ID = "clickhouse_dwh_mitratel"
 TARGET_DATABASE = "dwh_om"
 TARGET_TABLE = "fact_maintenanceorder"
-FILE_PATH = "/tmp/batch_DWH_tabmaintenanceorder_"
+FILE_PATH = "/tmp/batch_DWH_factmaintenanceorder_"
 DAG_ID = "DWH_om_maintenanceorder"
 DAG_INTERVAL = "3-59/5 * * * *"
 CHUNK_SIZE = 5000
@@ -25,6 +25,7 @@ LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
 LOG_TYPE = "truncate"
 LOG_KATEGORI = "Data Mart"
+TAGS = ["dwh", "om", "factmaintenanceorder"]
 
 default_args = {
     'owner': 'airflow',
@@ -38,7 +39,7 @@ dag = DAG(
     dag_id=DAG_ID,
     schedule_interval= DAG_INTERVAL,
     default_args=default_args,
-    catchup=False
+    catchup=False, tags=TAGS
 )
     
 def log_status(process_name, mark, status, error_message=None):

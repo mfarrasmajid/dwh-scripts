@@ -35,7 +35,8 @@ CLICKHOUSE_TABLE = "afvc"
 LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
 LOG_TYPE = "delta and skip compress"
-LOG_KATEGORI = "Data Lake"
+LOG_KATEGORI = "Data Lake" 
+TAGS = ["dl", "sap", "afvc"]
 INSERT_QUERY = """
                     INSERT INTO `sap`.`afvc`
                     (`AUFPL`,`APLZL`,`PLNFL`,`PLNKN`,`PLNAL`,`PLNTY`,`VINTV`,`PLNNR`,`ZAEHL`,`VORNR`,
@@ -436,7 +437,7 @@ with DAG(
     dag_id=DAG_ID,
     start_date=datetime(2024, 1, 1),
     schedule_interval= DAG_INTERVAL,
-    catchup=False,
+    catchup=False, tags=TAGS,
     default_args={
         'owner': 'airflow', 
         # 'retries': 1, 

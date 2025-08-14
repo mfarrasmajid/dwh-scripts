@@ -23,6 +23,7 @@ LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
 LOG_TYPE = "truncate"
 LOG_KATEGORI = "Data WareHouse"
+TAGS = ["dwh", "om", "reqcorrmo"]
 
 EXTRACT_QUERY = """
 SELECT DISTINCT 
@@ -70,7 +71,7 @@ dag = DAG(
     dag_id=DAG_ID,
     schedule_interval= DAG_INTERVAL,
     default_args=default_args,
-    catchup=False
+    catchup=False, tags=TAGS
 )
 
 def log_status(process_name, mark, status, error_message=None):

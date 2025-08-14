@@ -28,14 +28,15 @@ DELTA_LINK_PATH = '/tmp/sap_ekpo_delta_link.txt'
 SKIP_TOKEN_PATH = '/tmp/sap_ekpo_skip_token.txt'
 XML_DIR = '/tmp/sap_ekpo'
 DAG_ID = "DL_sap_ekpo"
-DAG_INTERVAL = "*/3 0-2,4-23 * * *"
+DAG_INTERVAL = "*/3 0-4,6-23 * * *"
 CLICKHOUSE_CONN_ID = "clickhouse_mitratel"
 CLICKHOUSE_DATABASE = "sap"
 CLICKHOUSE_TABLE = "ekpo"
 LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
 LOG_TYPE = "delta and skip compress"
-LOG_KATEGORI = "Data Lake"
+LOG_KATEGORI = "Data Lake" 
+TAGS = ["dl", "sap", "ekpo"]
 INSERT_QUERY = """
                     INSERT INTO `sap`.`ekpo`
                     (`EBELN`,`EBELP`,`UNIQUEID`,`LOEKZ`,`STATU`,`AEDAT`,`TXZ01`,`MATNR`,`EMATN`,`BUKRS`,`WERKS`,
@@ -515,7 +516,7 @@ with DAG(
     dag_id=DAG_ID,
     start_date=datetime(2024, 1, 1),
     schedule_interval= DAG_INTERVAL,
-    catchup=False,
+    catchup=False, tags=TAGS,
     default_args={
         'owner': 'airflow', 
         # 'retries': 1, 

@@ -27,13 +27,13 @@ DELTA_LINK_PATH = '/tmp/sapsim_iflot_delta_link.txt'
 SKIP_TOKEN_PATH = '/tmp/sapsim_iflot_skip_token.txt'
 XML_DIR = '/tmp/sapsim_iflot'
 DAG_ID = "DL_sapsim_iflot"
-DAG_INTERVAL = "9-59/15 * * * *"
+DAG_INTERVAL = "*/5 0-8,11-23 * * *"
 CLICKHOUSE_CONN_ID = "clickhouse_mitratel"
 CLICKHOUSE_DATABASE = "sapsim"
 CLICKHOUSE_TABLE = "iflot"
 LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
-LOG_TYPE = "delta"
+LOG_TYPE = "delta and skip compress"
 LOG_KATEGORI = "Data Lake" 
 TAGS = ["dl", "sapsim", "iflot"]
 INSERT_QUERY = """
@@ -182,33 +182,48 @@ def fetch_sap_cdc_initial(**kwargs):
         # file_path = os.path.join(XML_DIR, 'batch_0.xml')
         # with open(file_path, 'wb') as f:
         #     f.write(response.content)
-        xml_path = os.path.join(XML_DIR, 'batch_0.xml')
+        pattern = os.path.join(XML_DIR, 'batch*.xml')
+        for file_path in glob.glob(pattern):
+            os.remove(file_path)
+
+        if os.path.exists(SKIP_TOKEN_PATH):
+            with open(SKIP_TOKEN_PATH, "r") as f:
+                skiptoken = f.read().strip()
+            next_url = NEXT_URL + skiptoken
+        else:
+            next_url = BASE_URL + '&InitialLoad=true'
+
+        response = requests.get(next_url, headers=HEADERS, auth=HTTPBasicAuth(USERNAME, PASSWORD))
+        if response.status_code != 200:
+            raise Exception(f"Initial fetch failed: {response.text}")
+
+        file_path = os.path.join(XML_DIR, 'batch_0.xml')
+        with open(file_path, 'wb') as f:
+            f.write(response.content)
+
+        root = etree.fromstring(response.content)
         ns = {'atom': 'http://www.w3.org/2005/Atom'}
-        with open(xml_path, 'rb') as f:
-            root = etree.parse(f).getroot()
-            ns = {'atom': 'http://www.w3.org/2005/Atom'}
-            next_link_el = root.find("atom:link[@rel='next']", namespaces=ns)
-            if next_link_el is not None:
-                next_href = next_link_el.attrib['href']
-                # Parse the query string to extract $skiptoken
-                parsed = urllib.parse.urlparse(next_href)
-                qs = urllib.parse.parse_qs(parsed.query)
-                skiptoken = qs.get('$skiptoken', [None])[0]
-                if skiptoken:
-                    # Rebuild the skiptoken URL part
-                    skiptoken_url = f"FactsOfZCDCIFLOT?sap-client=300&$skiptoken={skiptoken}"
-                    with open(SKIP_TOKEN_PATH, "w") as f:
-                        f.write(skiptoken_url)
-                else:
-                    # fallback: write the original next_href if $skiptoken not found
-                    with open(SKIP_TOKEN_PATH, "w") as f:
-                        f.write(next_href)
+        next_link_el = root.find("atom:link[@rel='next']", namespaces=ns)
+        if next_link_el is not None:
+            next_href = next_link_el.attrib['href']
+            parsed = urllib.parse.urlparse(next_href)
+            qs = urllib.parse.parse_qs(parsed.query)
+            skiptoken = qs.get('$skiptoken', [None])[0]
+            if skiptoken:
+                # Rebuild the skiptoken URL part
+                skiptoken_url = f"FactsOfZCDCIFLOT?sap-client=300&$skiptoken={skiptoken}"
+                with open(SKIP_TOKEN_PATH, "w") as f:
+                    f.write(skiptoken_url)
             else:
-                # Jika tidak ada lagi halaman selanjutnya, hapus skiptoken (reset)
-                if os.path.exists(SKIP_TOKEN_PATH):
-                    os.remove(SKIP_TOKEN_PATH)
-                # if os.path.exists(START_TOKEN_PATH):
-                    # os.remove(START_TOKEN_PATH)
+                # fallback: write the original next_href if $skiptoken not found
+                with open(SKIP_TOKEN_PATH, "w") as f:
+                    f.write(next_href)
+        else:
+            # Jika tidak ada lagi halaman selanjutnya, hapus skiptoken (reset)
+            if os.path.exists(SKIP_TOKEN_PATH):
+                os.remove(SKIP_TOKEN_PATH)
+            # if os.path.exists(START_TOKEN_PATH):
+                # os.remove(START_TOKEN_PATH)
         log_status(process_name, random_value, "success")
     except Exception as e:
         log_status(process_name, random_value, "failed", str(e))

@@ -22,91 +22,228 @@ LOG_KATEGORI = "Data WareHouse"
 TAGS = ["dwh", "spmk", "factconst"]
 
 EXTRACT_QUERY = """
+    SELECT DISTINCT
+    a.name                               AS project_id,
+    a.site_id_tenant                     AS site_id,
+    a.site_name_tenant                   AS site_name,
+    a.area                               AS area,
+    a.region                             AS regional,
+    a.site_status                        AS status_project,
+    a.actual_rfi_date                    AS rfi_date, 
+    b.parent                             AS spmk_number,
+    b.is_cancel                          AS spmk_cancel,
+    c.scope_of_work                      AS spmk_sow,
+    c.approved_date                      AS spmk_approved_date,
+    c.creation                           AS spmk_create_date,
+    d.name                               AS boq_number, 
+    d.workflow_state                     AS status_boq,
+    d.total_spmk                         AS nilai_spmk,
+    d.total_standard_items               AS nilai_standar,
+    d.total_corrective_items             AS nilai_addwork,
+    d.total_standard_and_corrective_items AS nilai_boq,
+    d.creation                           AS create_date_boq,
+    d.approved_date                      AS approved_date_boq,
+    d.draft_date                         AS boq_draft_date,
+    d.pm_regional_review_date            AS boq_pm_regional_review_date,
+    d.manager_construction_om_deployment_review_date AS boq_manager_construction_om_deployment_review_date,
+    d.gm_review_date                     AS boq_gm_review_date,
+    d.manager_construction_project_deployment_review_date AS boq_manager_construction_project_deployment_review_date,
+    d.gm_construction_project_manager_review_date AS boq_gm_construction_project_manager_review_date,
+    d.vp_procurement_review_date         AS boq_vp_procurement_review_date,
+    e.parent                             AS pr_number,
+    e.item_number_of_purchasing_document_sap AS pr_item,
+    e.amount                             AS pr_value,
+    e.creation                           AS create_date_pr,  
+    g.name                               AS po_number,
+    f.item_number_of_purchasing_document_sap AS po_item,
+    f.creation                           AS create_date_po,
+    f.net_amount                         AS po_value,
+    g.aprroved_date                      AS approved_date_po,
+    g.workflow_state                     AS status_po,
+    h.name                               AS bast_number,
+    h.workflow_state                     AS status_ebast,
+    h.creation                           AS create_date_ebast,
+    h.gm_approve_date                    AS approved_date_ebast,
+    h.pm_review_date                     AS bast_pm_review_date,
+    h.mgr_review_date                    AS bast_mgr_review_date,
+    h.workflow_state                     AS bast_status,
+    i.gr_sap_number                      AS nomor_gr,
+    i.gr_sap_status                      AS status_gr,
+    i.grand_total                        AS value_gr,
+    i.creation                           AS gr_create_date,
+    i.posting_date                       AS gr_done_date
+    FROM
+    (
     SELECT
-        a.name AS project_id,
-        a.site_id_tenant AS site_id_tenant, 
-        a.site_name_tenant AS site_name, 
-        a.area AS area, 
-        a.region AS regional,
-        a.status AS status_progress,
-        b.parent AS no_spmk,
-        bc.scope_of_work AS sow_spmk,
-        b.creation AS create_date_spmk,
-        bc.approved_date AS approved_date_spmk,
-        c.name AS nomor_boq,
-        c.workflow_state AS status_boq,
-        c.creation AS create_date_boq,
-        c.approved_date AS approved_date_boq,
-        c.total_spmk AS nominal_spmk,
-        c.total_standard_items AS nominal_standar,
-        c.total_corrective_items AS nominal_addwork,
-        c.total_standard_and_corrective_items AS nominal_total,
-        d.parent AS nomor_pr,
-        d.creation AS create_date_pr,
-        e.parent AS nomor_po,
-        e.creation AS create_date_po,
-        ef.aprroved_date AS approved_date_po,
-        ef.workflow_state AS status_po,
-        ef.grand_total AS nominal_po,
-        f.name as nomor_bast,
-        f.workflow_state AS status_ebast,
-        f.creation AS create_date_ebast,
-        f.gm_approve_date AS approved_date_ebast,
-        g.gr_sap_number AS nomor_gr,
-        g.gr_sap_status AS status_gr
-    FROM spmk.tabproject a
-    LEFT JOIN spmk.tabspmkchild b ON
-        b.project_id = a.name 
-    LEFT JOIN spmk.tabspmk bc ON
-        bc.name = b.parent
-    LEFT JOIN spmk.tabboqactual c ON
-        c.project_id = a.name
-    LEFT JOIN spmk.tabmaterialrequestitem d ON
-        d.project = a.name
-    LEFT JOIN spmk.tabpurchaseorderitem e ON
-        e.pr_number = d.parent
-    LEFT JOIN spmk.tabpurchaseorder ef ON
-        ef.name = e.parent
-    LEFT JOIN spmk.tabbast1 f ON
-        f.purchase_orderpo_no = e.parent
-    LEFT JOIN spmk.tabgoodreceipt g ON
-        g.po_number = e.parent
-    WHERE c.is_spmk = '1' 
+        name,
+        site_id_tenant,
+        site_name_tenant,
+        area,
+        region,
+        site_status,
+        actual_rfi_date
+    FROM spmk.tabproject
+    ) AS a
+    LEFT JOIN
+    (
+    SELECT DISTINCT
+        project_id,
+        parent,
+        is_cancel
+    FROM spmk.tabspmkchild
+    ) AS b
+    ON b.project_id = a.name
+    LEFT JOIN
+    (
+    SELECT DISTINCT
+        name,
+        scope_of_work,
+        approved_date,
+        creation
+    FROM spmk.tabspmk
+    ) AS c
+    ON c.name = b.parent
+    LEFT JOIN
+    (
+    SELECT DISTINCT
+        project_id,
+        spmk_number,
+        name,
+        workflow_state,
+        total_spmk,
+        total_standard_items,
+        total_corrective_items,
+        total_standard_and_corrective_items,
+        creation,
+        approved_date,
+        is_spmk,
+        draft_date,
+        pm_regional_review_date,
+        manager_construction_om_deployment_review_date,
+        gm_review_date,
+        manager_construction_project_deployment_review_date,
+        gm_construction_project_manager_review_date,
+        vp_procurement_review_date
+    FROM spmk.tabboqactual
+    ) AS d
+    ON d.project_id = a.name
+    AND d.spmk_number = c.name
+    LEFT JOIN
+    (
+    SELECT DISTINCT
+        spmk_number,
+        parent,
+        item_number_of_purchasing_document_sap,
+        amount,
+        creation
+    FROM spmk.tabmaterialrequestitem
+    ) AS e
+    ON e.spmk_number = d.spmk_number
+    LEFT JOIN
+    (
+    SELECT DISTINCT
+        pr_number,
+        parent,
+        item_number_of_purchasing_document_sap,
+        creation,
+        net_amount
+    FROM spmk.tabpurchaseorderitem
+    ) AS f
+    ON f.pr_number = e.parent
+    LEFT JOIN
+    (
+    SELECT DISTINCT
+        name,
+        aprroved_date,
+        workflow_state
+    FROM spmk.tabpurchaseorder
+    ) AS g
+    ON g.name = f.parent
+    LEFT JOIN
+    (
+    SELECT DISTINCT
+        name,
+        purchase_orderpo_no,
+        project_id,
+        workflow_state,
+        creation,
+        gm_approve_date,
+        pm_review_date,
+        mgr_review_date
+    FROM spmk.tabbast1
+    ) AS h
+    ON h.purchase_orderpo_no = g.name
+    AND h.project_id = a.name
+    LEFT JOIN
+    (
+    SELECT DISTINCT
+        po_number,
+        project_id,
+        item_number_of_purchasing_document_sap,
+        gr_sap_number,
+        gr_sap_status,
+        grand_total,
+        creation,
+        posting_date
+    FROM spmk.tabgoodreceipt
+    ) AS i
+    ON i.po_number = g.name
+    AND i.project_id = a.name
+    AND i.item_number_of_purchasing_document_sap = f.item_number_of_purchasing_document_sap
+    WHERE d.is_spmk = '1'
+    AND d.name NOT LIKE '%SPMK%'
 """
 
 SOURCE_COLUMNS = [
-    'project_id',
-    'site_id_tenant', 
-    'site_name', 
-    'area', 
-    'regional',
-    'status_progress',
-    'no_spmk',
-    'sow_spmk',
-    'create_date_spmk',
-    'approved_date_spmk',
-    'nomor_boq',
-    'status_boq',
-    'create_date_boq',
-    'approved_date_boq',
-    'nominal_spmk',
-    'nominal_standar',
-    'nominal_addwork',
-    'nominal_total',
-    'nomor_pr',
-    'create_date_pr',
-    'nomor_po',
-    'create_date_po',
-    'approved_date_po',
-    'status_po',
-    'nominal_po',
-    'nomor_bast',
-    'status_ebast',
-    'create_date_ebast',
-    'approved_date_ebast',
-    'nomor_gr',
-    'status_gr'
-]
+  'project_id',
+  'site_id',
+  'site_name',
+  'area',
+  'regional',
+  'status_project',
+  'rfi_date',
+  'spmk_number',
+  'spmk_cancel',
+  'spmk_sow',
+  'spmk_approved_date',
+  'spmk_create_date',
+  'boq_number',
+  'status_boq',
+  'nilai_spmk',
+  'nilai_standar',
+  'nilai_addwork',
+  'nilai_boq',
+  'create_date_boq',
+  'approved_date_boq',
+  'boq_draft_date',
+  'boq_pm_regional_review_date',
+  'boq_manager_construction_om_deployment_review_date',
+  'boq_gm_review_date',
+  'boq_manager_construction_project_deployment_review_date',
+  'boq_gm_construction_project_manager_review_date',
+  'boq_vp_procurement_review_date',
+  'pr_number',
+  'pr_item',
+  'pr_value',
+  'create_date_pr',
+  'po_number',
+  'po_item',
+  'create_date_po',
+  'po_value',
+  'approved_date_po',
+  'status_po',
+  'bast_number',
+  'status_ebast',
+  'create_date_ebast',
+  'approved_date_ebast',
+  'bast_pm_review_date',
+  'bast_mgr_review_date',
+  'bast_status',
+  'nomor_gr',
+  'status_gr',
+  'value_gr',
+  'gr_create_date',
+  'gr_done_date' ]
 
 default_args = {
     'owner': 'airflow',
@@ -153,6 +290,13 @@ def get_total_rows():
 )
 def factconst_parallel_dag():
     @task
+    def truncate_table():
+        hook = ClickHouseHook(clickhouse_conn_id=TARGET_CONN_ID)
+        truncate_query = f"TRUNCATE TABLE `{TARGET_DATABASE}`.`{TARGET_TABLE}`"
+        logging.warning(f"Truncating table {TARGET_DATABASE}.{TARGET_TABLE}")
+        hook.execute(truncate_query)
+
+    @task
     def get_total_rows_task():
         process_name = "get_total_rows"
         random_value = random.randint(1000, 9999)
@@ -189,7 +333,6 @@ def factconst_parallel_dag():
             data = conn.execute(batch_query)
             logging.warning(f"Fetched {len(data)} rows for batch_number={batch_number}")
             df = pd.DataFrame(data, columns=SOURCE_COLUMNS)
-            df = df.where(pd.notnull(df), '')
             file_path = f"{FILE_PATH}_{batch_number}.json"
             df.to_json(file_path, orient="records", default_handler=str)
             logging.warning(f"Saved batch {batch_number} to {file_path}")
@@ -215,7 +358,6 @@ def factconst_parallel_dag():
                 log_status(process_name, random_value, "success")
                 return
             df = pd.DataFrame(data_dict, dtype=str)
-            df = df.where(pd.notnull(df), '')
             df = df.applymap(lambda x: x.replace("\\", "") if isinstance(x, str) else x)
             df = df.applymap(lambda x: x.replace("'", "\\'") if isinstance(x, str) else x)
             hook = ClickHouseHook(clickhouse_conn_id=TARGET_CONN_ID)
@@ -234,7 +376,9 @@ def factconst_parallel_dag():
 
     meta = get_total_rows_task()
     batch_numbers = get_batch_numbers(meta)
-    extract_batch.partial(meta=meta).expand(batch_number=batch_numbers)
-    load_batch.partial(meta=meta).expand(batch_number=batch_numbers)
+    extract = extract_batch.partial(meta=meta).expand(batch_number=batch_numbers)
+    truncate = truncate_table()
+    load_tasks = load_batch.partial(meta=meta).expand(batch_number=batch_numbers)
+    meta >> batch_numbers >> extract >> truncate >> load_tasks
 
 factconst_parallel_dag()

@@ -11,18 +11,18 @@ from airflow_clickhouse_plugin.hooks.clickhouse import ClickHouseHook
 MYSQL_CONN_ID = "db_oneflux_tms"
 CLICKHOUSE_CONN_ID = "clickhouse_mitratel"
 MYSQL_DATABASE = "db_tms"
-MYSQL_TABLE = "tabCX Result"
-CLICKHOUSE_DATABASE = "cx"
-CLICKHOUSE_TABLE = "tabcxresult"
-FILE_PATH = "/tmp/debug_DL_spmk_tabcxresult.json"
-DAG_ID = "DL_cx_tabcxresult"
-DAG_INTERVAL = "30 17 * * *"
+MYSQL_TABLE = "tabLand Lease Payment List"
+CLICKHOUSE_DATABASE = "spmk"
+CLICKHOUSE_TABLE = "tablandleasepaymentlist"
+FILE_PATH = "/tmp/debug_DL_spmk_tablandleasepaymentlist.json"
+DAG_ID = "DL_spmk_tablandleasepaymentlist"
+DAG_INTERVAL = "0 * * * *"
 CHUNK_SIZE = 5000
 LOG_CONN_ID = "airflow_logs_mitratel"
 LOG_TABLE = "airflow_logs"
 LOG_TYPE = "truncate"
 LOG_KATEGORI = "Data Lake" 
-TAGS = ["dl", "cx", "tabcxresult"]
+TAGS = ["dl", "spmk", "tablandleasepaymentlist"]
 
 default_args = {
     'owner': 'airflow',
@@ -38,7 +38,7 @@ dag = DAG(
     default_args=default_args,
     catchup=False, tags=TAGS
 )
-
+    
 def log_status(process_name, mark, status, error_message=None):
     """Insert or update the log table."""
     pg_hook = PostgresHook(postgres_conn_id=LOG_CONN_ID)

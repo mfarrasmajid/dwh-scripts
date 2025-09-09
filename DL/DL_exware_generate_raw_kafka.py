@@ -4,9 +4,7 @@ from airflow.models import Variable
 from datetime import datetime, timedelta
 
 import uuid
-import mysql.connector
 from clickhouse_driver import Client
-
 
 # ---------------------
 # 1) Default args & DAG
@@ -20,35 +18,17 @@ default_args = {
 }
 
 dag = DAG(
-    dag_id='DL_supof_generate_raw_kafka',
+    dag_id='DL_exware_generate_raw_kafka',
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
-    tags=['dl', 'support_oneflux', 'init'],
+    tags=['dl', 'exware', 'postgres', 'init'],
 )
-
 
 # ---------------------
 # 2) Python callable
 # ---------------------
 def main():
-    # --- MySQL Connection ---
-    mysql_conn = mysql.connector.connect(
-        host=Variable.get("mysql_dbase_host"),
-        user=Variable.get("mysql_dbase_user"),
-        password=Variable.get("mysql_dbase_pass"),
-    )
-    mysql_cursor = mysql_conn.cursor()
-
-    # Ambil semua database kecuali sistem
-    mysql_cursor.execute("SHOW DATABASES;")
-    databases = [
-        db[0] for db in mysql_cursor.fetchall()
-        if db[0] not in ('information_schema', 'mysql', 'performance_schema', 'sys')
-    ]
-
-    print(f"Akan mereplikasi {len(databases)} database: {databases}")
-
     # --- ClickHouse Connection ---
     ch_client = Client(
         host=Variable.get("clickhouse_datalake_host"),
@@ -56,31 +36,36 @@ def main():
         password=Variable.get("clickhouse_datalake_pass"),
     )
 
-    # Pastikan database target ada
+    # Databases
     ch_client.execute("CREATE DATABASE IF NOT EXISTS kafka_mass")
     ch_client.execute("CREATE DATABASE IF NOT EXISTS kafka_connector")
-    ch_client.execute("CREATE DATABASE IF NOT EXISTS support_oneflux")
+    ch_client.execute("CREATE DATABASE IF NOT EXISTS exware")
 
-    group_name = f"ch_consumer_{uuid.uuid4().hex[:16]}"
+    # Unique consumer group
+    group_name = f"ch_consumer_pg_{uuid.uuid4().hex[:16]}"
+
+    kafka_brokers = Variable.get("kafka_broker_list", default_var="192.168.101.164:9092")
+    pg_topic = Variable.get("debezium_pg_topic", default_var="postgres-mass-server-4.all-dbs")
 
     # Kafka Source Table
     ch_client.execute(f"""
-    CREATE TABLE IF NOT EXISTS kafka_mass.kafka_raw
+    CREATE TABLE IF NOT EXISTS kafka_mass.kafka_raw_exware
     (
         _raw String
     )
     ENGINE = Kafka
-    SETTINGS kafka_broker_list = '192.168.101.164:9092',
-             kafka_topic_list = 'mysql-mass-server.all-dbs',
-             kafka_group_name = '{group_name}',
+    SETTINGS kafka_broker_list = %(brokers)s,
+             kafka_topic_list = %(topic)s,
+             kafka_group_name = %(group)s,
              kafka_format = 'RawBLOB'
-    """)
+    """, {'brokers': kafka_brokers, 'topic': pg_topic, 'group': group_name})
 
     # Target Table (ReplacingMergeTree)
     ch_client.execute("""
-    CREATE TABLE IF NOT EXISTS support_oneflux.all_mysql_data
+    CREATE TABLE IF NOT EXISTS exware.all_mysql_data
     (
         source_database String,
+        source_schema String,
         source_table String,
         pk_value String,
         payload String,
@@ -89,13 +74,13 @@ def main():
         _ts DateTime
     )
     ENGINE = ReplacingMergeTree(_ts)
-    ORDER BY (source_database, source_table, pk_value)
+    ORDER BY (source_database, source_schema, source_table, pk_value)
     """)
 
     # Materialized View
     ch_client.execute("""
-    CREATE MATERIALIZED VIEW kafka_connector.mv_all_mysql_data
-    TO support_oneflux.all_mysql_data
+    CREATE MATERIALIZED VIEW IF NOT EXISTS kafka_connector.mv_exware_data
+    TO exware.all_mysql_data
     AS
     WITH
         JSONExtractRaw(_raw, 'after')  AS j_after,
@@ -103,8 +88,9 @@ def main():
         JSONExtractRaw(_raw, 'source') AS j_src,
         JSON_VALUE(JSONExtractRaw(_raw, 'op'), '$') AS op
     SELECT
-        JSON_VALUE(j_src, '$.db')    AS source_database,
-        JSON_VALUE(j_src, '$.table') AS source_table,
+        JSON_VALUE(j_src, '$.db')      AS source_database,
+        JSON_VALUE(j_src, '$.schema')  AS source_schema,
+        JSON_VALUE(j_src, '$.table')   AS source_table,
         if(
             op = 'd',
             coalesce(
@@ -122,17 +108,16 @@ def main():
         op = 'd' AS is_deleted,
         op       AS _op,
         now()    AS _ts
-    FROM kafka_mass.kafka_raw
+    FROM kafka_mass.kafka_raw_exware
     """)
 
-    print("✅ Setup selesai! Semua database MySQL akan direplikasi real-time ke ClickHouse.")
-
+    print("✅ Setup selesai! PostgreSQL Debezium events direplikasi ke ClickHouse (exware.all_mysql_data).")
 
 # ---------------------
 # 3) Task
 # ---------------------
 generate_task = PythonOperator(
-    task_id='generate_raw_kafka',
+    task_id='generate_raw_kafka_pg',
     python_callable=main,
     dag=dag,
 )

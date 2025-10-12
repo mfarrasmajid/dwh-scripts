@@ -15,10 +15,10 @@ MYSQL_DATABASE = "db_tms"
 MYSQL_TABLE = "tabSPMK"
 CLICKHOUSE_DATABASE = "spmk"
 CLICKHOUSE_TABLE = "tabspmk"
-FILE_PATH = "/tmp/batch_spmk_"
+FILE_PATH = "/tmp/batch_tabspmk_"
 DAG_ID = "DL_spmk_tabspmk"
-DAG_INTERVAL = "8 17 * * *"
-CHUNK_SIZE = 1000
+DAG_INTERVAL = "1-59/15 * * * *"
+CHUNK_SIZE = 5000
 BATCH_SIZE = 10000
 BATCH_NO = 9
 LOG_CONN_ID = "airflow_logs_mitratel"
@@ -30,9 +30,7 @@ TAGS = ["dl", "spmk", "tabspmk"]
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
-    'start_date': datetime(2024, 2, 1, 0, 0),
-    # 'retries': 1,
-    # 'retry_delay': timedelta(minutes=5),
+    'start_date': datetime(2024, 2, 1, 19, 5),
 }
 
 dag = DAG(
@@ -134,7 +132,7 @@ def extract_batch(batch_number, **kwargs):
         
         sql = f"""
             SELECT * FROM `{MYSQL_DATABASE}`.`{MYSQL_TABLE}`
-            WHERE modified > '{latest_modified}'
+            WHERE modified >= '{latest_modified}'
             ORDER BY modified ASC
             LIMIT {BATCH_SIZE} OFFSET {offset}
         """

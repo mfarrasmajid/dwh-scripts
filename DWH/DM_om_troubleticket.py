@@ -46,7 +46,9 @@ COLUMNS = [
     "tt_id_ampuhc",
     "class_of_service",
     "maintenance_zone",
-    "mttr" ]
+    "mttr", 
+    "priority_mtel", 
+    "detail_sla_status", "tt_source" ]
 
 default_args = {
     'owner': 'airflow',

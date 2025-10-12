@@ -139,8 +139,43 @@ def extract_batch(batch_number, **kwargs):
             return
 
         sql = f"""
-            SELECT * FROM {SOURCE_DATABASE}.{SOURCE_TABLE}
-            WHERE modified >= '{latest_modified}'
+            WITH
+                replaceRegexpAll(t.opening_time, '^[0-9]+\\s+days\\s+', '') AS opening_time_clean,
+
+                parseDateTime64BestEffortOrNull(
+                    concat(t.opening_date, ' ', opening_time_clean),
+                    6
+                ) AS opening_dt64
+            SELECT
+                t.*,
+                CASE
+                    WHEN t.priority IN ('ACCESS SITE','Besar','DAMAGE FOUND','RECOVERY GROUNDING STOLEN','ROOM TEMPERATURE','Major','Major MMP','Major Priority') THEN 'Major'
+                    WHEN t.priority IN ('Kecil','Minor','Minor MMP','Minor Priority') THEN 'Minor'
+                    WHEN t.priority IN ('Darurat','Emergency','Emergency MMP','Emergency Priority') THEN 'Emergency'
+                    WHEN t.priority IN ('Critical','Critical MMP','Critical Priority','INPUT POWER LOSS','INPUT POWER LOSS (HUB SITE)') THEN 'Critical'
+                    ELSE NULL
+                END AS priority_mtel,
+                CASE
+                    WHEN trim(t.status) IN ('Open','On Progress','Need Assign')
+                        AND toFloat64(mttr_hours) > 0
+                    THEN
+                        CASE
+                            WHEN dateDiff('second', opening_dt64, now()) / 3600.0 < 0.7 * toFloat64(mttr_hours)
+                            THEN 'In SLA'
+                            WHEN dateDiff('second', opening_dt64, now()) / 3600.0 < toFloat64(mttr_hours)
+                            THEN 'Akan Out SLA'
+                            ELSE 'Out SLA'
+                        END
+                    ELSE NULL
+                END AS detail_sla_status,
+                CASE
+                    WHEN nullIf(t.mo_reference,'') != 'None'
+                    AND nullIf(t.case_finding_reference,'') != 'None'
+                    AND coalesce(t.reference,'') != 'NMS' THEN 'External'
+                    ELSE 'Internal'
+                END AS tt_source
+            FROM {SOURCE_DATABASE}.{SOURCE_TABLE} as t
+            WHERE modified >= '{latest_modified}' AND toDate(parseDateTimeBestEffortOrNull(t.opening_date)) >= toDate('2025-01-01')
             ORDER BY modified ASC
             LIMIT {BATCH_SIZE} OFFSET {offset}
         """
@@ -148,6 +183,7 @@ def extract_batch(batch_number, **kwargs):
         conn = hook.get_conn()
         rows = conn.execute(sql)
         columns = [col[0] for col in conn.execute(f"DESCRIBE TABLE {SOURCE_DATABASE}.{SOURCE_TABLE}")]
+        columns += ["priority_mtel", "detail_sla_status", "tt_source"]
 
         if rows:
             df = pd.DataFrame(rows, columns=columns).astype(str)

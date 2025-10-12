@@ -17,7 +17,7 @@ CLICKHOUSE_DATABASE = "spmk"
 CLICKHOUSE_TABLE = "tabpurchaseorderitem"
 FILE_PATH = "/tmp/batch_tabpurchaseorderitem_"
 DAG_ID = "DL_spmk_tabpurchaseorderitem"
-DAG_INTERVAL = "1-59/5 * * * *"
+DAG_INTERVAL = "4-59/15 * * * *"
 CHUNK_SIZE = 5000
 BATCH_SIZE = 10000
 BATCH_NO = 9
@@ -132,7 +132,7 @@ def extract_batch(batch_number, **kwargs):
         
         sql = f"""
             SELECT * FROM `{MYSQL_DATABASE}`.`{MYSQL_TABLE}`
-            WHERE modified > '{latest_modified}'
+            WHERE modified >= '{latest_modified}'
             ORDER BY modified ASC
             LIMIT {BATCH_SIZE} OFFSET {offset}
         """

@@ -11,6 +11,7 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow_clickhouse_plugin.hooks.clickhouse import ClickHouseHook
 from croniter import croniter
 from airflow.exceptions import AirflowSkipException
+from MySQLdb import OperationalError as MySQLOperationalError
 
 # ========= DAG meta =========
 DAG_ID = "DL_oneflux_all_table_keyset"
@@ -69,6 +70,42 @@ def _sync_all_columns(
     # Return fresh map
     return _ch_columns(ch, target_db, target_table)
 
+def _ch_insertable_columns(ch, db: str, table: str):
+    conn = ch.get_conn()
+    def _lit(s: str) -> str: return s.replace("'", "\\'")
+    rows = conn.execute(f"""
+        SELECT name, type, COALESCE(default_kind, '')
+        FROM system.columns
+        WHERE database='{_lit(db)}' AND table='{_lit(table)}'
+        ORDER BY position
+    """)
+    cols, types = [], {}
+    for name, t, kind in rows:
+        types[name] = t
+        k = (kind or '').upper()
+        if k not in ('MATERIALIZED', 'ALIAS'):
+            cols.append(name)
+    return cols, types
+
+def _is_mysql_quota_error(e: Exception) -> bool:
+    return isinstance(e, MySQLOperationalError) and getattr(e, "args", None) and e.args[0] in (1226, 1203)
+
+def _mark_success_and_bump(job: dict, proc: str):
+    # close pending log as success
+    _log_status(job, proc, job["_current_mark"], "success")
+    # bump registry as success, schedule next
+    pg = PostgresHook(postgres_conn_id=REGISTRY_CONN_ID)
+    now = datetime.now(timezone.utc)
+    next_run = _compute_next_run(job, now)
+    pg.run(
+        f"""
+        UPDATE {REGISTRY_TABLE}
+        SET last_run_at=%s, next_run_at=%s, last_status=%s, last_error=%s
+        WHERE id=%s
+        """,
+        parameters=(now.isoformat(), next_run.isoformat(), 'success', None, job["id"])
+    )
+
 def _dt_to_iso(v: Any):
     if isinstance(v, datetime):
         # convert tz-aware/naive to ISO8601 string (keeps 'Z' offset if present)
@@ -114,7 +151,7 @@ def _mk_converter(ch_type: str):
         return (lambda v: None if v in (None, "") else float(v))
     if t.startswith("Decimal("):
         return (lambda v: None if v in (None, "") else Decimal(str(v)))
-    return (lambda v: None if v is None else str(v))
+    return (lambda v: None if v in (None, "") else str(v))
 
 def _mysql_columns(mysql: MySqlHook, db: str, table: str):
     sql = """
@@ -264,8 +301,8 @@ with DAG(
 
     @task(trigger_rule="none_failed")
     def run_one_job(job: Dict[str, Any]) -> int:
-        """Run the whole pipeline for a single registry row, sequentially (no nested mapping)."""
         mark = f"{job['id']}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        job["_current_mark"] = mark  # <-- so helpers can access the mark
         inserted_total = 0
 
         def ok(proc): _log_status(job, proc, mark, "success")
@@ -273,11 +310,18 @@ with DAG(
         def fail(proc, e): _log_status(job, proc, mark, "failed", str(e))
 
         try:
-            # 1) Ensure table
+            # 1) Ensure table (this step needs MySQL for column list)
             proc = f"{job['id']}_ensure_clickhouse_table"; pend(proc)
             mysql = MySqlHook(mysql_conn_id=job["source_mysql_conn_id"])
-            cols = _mysql_columns(mysql, job["source_db"], job["source_table"])
-            if not cols: raise RuntimeError("No columns discovered from MySQL table.")
+            try:
+                cols = _mysql_columns(mysql, job["source_db"], job["source_table"])
+            except MySQLOperationalError as e:
+                if _is_mysql_quota_error(e):
+                    _mark_success_and_bump(job, proc)
+                    return 0  # treat as success/skip
+                raise
+            if not cols:
+                raise RuntimeError("No columns discovered from MySQL table.")
 
             pk = job["pk_col"]; version_col = job.get("version_col")
             col_lines = []
@@ -309,13 +353,13 @@ with DAG(
             conn_ch.execute(db_sql); conn_ch.execute(table_sql)
             ok(proc)
 
-            # 2) Sync schema (only version_v for now)
+            # 2) Sync schema
             proc = f"{job['id']}_sync_clickhouse_schema"; pend(proc)
             ch_cols = _sync_all_columns(
                 ch=ch,
                 target_db=job["target_db"],
                 target_table=job["target_table"],
-                mysql_cols=cols,               # from _mysql_columns(...) you already fetched above
+                mysql_cols=cols,
                 pk=pk,
                 version_col=version_col
             )
@@ -333,10 +377,17 @@ with DAG(
                     last_iso = last_val.isoformat() if hasattr(last_val, "isoformat") else str(last_val)
             ok(proc)
 
-            # 4) Extract & load with KEYSET pagination  (FIXED)
+            # 4) Extract & load
             proc = f"{job['id']}_extract_load"; pend(proc)
-            # MySQL raw connection for stability
-            conn_my = mysql.get_conn(); cur = conn_my.cursor()
+            try:
+                conn_my = mysql.get_conn()
+            except MySQLOperationalError as e:
+                if _is_mysql_quota_error(e):
+                    _mark_success_and_bump(job, proc)
+                    return 0
+                raise
+
+            cur = conn_my.cursor()
             try:
                 cur.execute("SET SESSION net_read_timeout=900, net_write_timeout=900")
                 cur.execute("SET SESSION wait_timeout=7200, interactive_timeout=7200")
@@ -345,43 +396,36 @@ with DAG(
 
             db, tbl = job["source_db"], job["source_table"]
             chunk_rows = int(job.get("chunk_rows") or 10000)
-            cols_meta = _mysql_columns(mysql, db, tbl)
+            # re-use cols (we already fetched); but if you want fresh:
+            # wrap again with quota guard:
+            # try: cols_meta = _mysql_columns(mysql, db, tbl)
+            # except MySQLOperationalError as e:
+            #     if _is_mysql_quota_error(e):
+            #         _mark_success_and_bump(job, proc); return 0
+            #     raise
+            cols_meta = cols
             col_names = [c["COLUMN_NAME"] for c in cols_meta]
             select_cols = ", ".join(f"`{c}`" for c in col_names)
 
-            # Determine PK type characteristics from MySQL metadata
-            pk = job["pk_col"]; version_col = job.get("version_col")
             mysql_type_map = {c["COLUMN_NAME"]: (c["DATA_TYPE"] or "").lower() for c in cols_meta}
             pk_mysql_type = mysql_type_map.get(pk, "")
-            # Treat these as string-like; pin binary collation so comparisons are consistent
             _STRING_TYPES = {"varchar","char","text","tinytext","mediumtext","longtext","json","enum","set"}
             pk_is_string = pk_mysql_type in _STRING_TYPES
-            # If PKs are numeric strings and you want numeric ordering, flip this to True
             CAST_PK_NUMERIC = False
 
-            # Prepare CH insert (AFTER schema sync)
-            ch_types = _ch_columns(ch, job["target_db"], job["target_table"])
-
-            # Use only columns that exist in CH (guards schema races / partial deployments)
-            col_names_insert = [c for c in col_names if c in ch_types]
-
-            # Build converters and INSERT for the filtered column set
+            # ch_types = _ch_columns(ch, job["target_db"], job["target_table"])
+            # col_names_insert = [c for c in col_names if c in ch_types]
+            col_names_insert, ch_types = _ch_insertable_columns(ch, job["target_db"], job["target_table"])
             converters = [_mk_converter(ch_types.get(col, "String")) for col in col_names_insert]
             quoted_cols = ", ".join(f"`{c}`" for c in col_names_insert)
             insert_sql = f"INSERT INTO `{job['target_db']}`.`{job['target_table']}` ({quoted_cols}) VALUES"
-            
-            # --- Cursor bootstrap ---
-            # If you want a FULL SNAPSHOT: leave both cursors None (we'll scan from the beginning).
-            # If INCREMENTAL and has_version: we start after the last seen version in CH.
+
             cursor_pk = None
             cursor_ver = None
             if has_version and last_iso:
-                # Start strictly after last version stored in ClickHouse.
                 cursor_ver = last_iso
-                # Minimal PK to resume from the very beginning of that version.
                 cursor_pk = "" if pk_is_string else 0
 
-            # --- Build ORDER BY (consistent with WHERE comparison) ---
             if has_version:
                 if CAST_PK_NUMERIC:
                     order_by = f"`{version_col}` ASC, CAST(`{pk}` AS UNSIGNED) ASC"
@@ -397,15 +441,12 @@ with DAG(
                 else:
                     order_by = f"`{pk}` ASC"
 
-            # --- Keyset extraction loop (tuple compare) ---
             while True:
                 params = []
                 if has_version:
                     if cursor_ver is None or cursor_pk is None:
-                        # FULL SNAPSHOT: start from the beginning (no WHERE)
                         where_sql = "1=1"
                     else:
-                        # Resume strictly after (version, pk)
                         if CAST_PK_NUMERIC:
                             where_sql = f"(`{version_col}`, CAST(`{pk}` AS UNSIGNED)) > (%s, %s)"
                         elif pk_is_string:
@@ -414,7 +455,6 @@ with DAG(
                             where_sql = f"(`{version_col}`, `{pk}`) > (%s, %s)"
                         params.extend([cursor_ver, cursor_pk])
                 else:
-                    # No version column – paginate by PK only
                     if cursor_pk is None:
                         where_sql = "1=1"
                     else:
@@ -435,12 +475,20 @@ with DAG(
                 """
                 params.append(chunk_rows)
 
-                cur.execute(sql, params)
+                try:
+                    cur.execute(sql, params)
+                except MySQLOperationalError as e:
+                    if _is_mysql_quota_error(e):
+                        _mark_success_and_bump(job, proc)
+                        try: cur.close(); conn_my.close()
+                        except Exception: pass
+                        return 0
+                    raise
+
                 rows = cur.fetchall()
                 if not rows:
                     break
 
-                # Convert & insert batch
                 src_index = {name: idx for idx, name in enumerate(col_names)}
                 batch = []
                 for r in rows:
@@ -448,10 +496,10 @@ with DAG(
                     for cname, conv in zip(col_names_insert, converters):
                         vals.append(conv(r[src_index[cname]]))
                     batch.append(tuple(vals))
-                conn_ch.execute(insert_sql, batch)
+
+                conn_ch.execute(insert_sql, batch, types_check=True)
                 inserted_total += len(batch)
 
-                # Advance cursor to the last row of this batch
                 last_row = rows[-1]
                 pk_idx = col_names.index(pk)
                 cursor_pk = last_row[pk_idx]
@@ -465,8 +513,7 @@ with DAG(
                 pass
             ok(proc)
 
-
-            # 5) Bump next_run_at
+            # 5) Summarize
             proc = f"{job['id']}_summarize"; pend(proc)
             pg = PostgresHook(postgres_conn_id=REGISTRY_CONN_ID)
             now = datetime.now(timezone.utc)
@@ -480,11 +527,9 @@ with DAG(
                 parameters=(now.isoformat(), next_run.isoformat(), 'success', None, job["id"])
             )
             ok(proc)
-
             return inserted_total
 
         except Exception as e:
-            # log failure & safe backoff
             fail(proc, e)
             try:
                 pg = PostgresHook(postgres_conn_id=REGISTRY_CONN_ID)

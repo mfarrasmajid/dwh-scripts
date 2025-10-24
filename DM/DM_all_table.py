@@ -37,6 +37,8 @@ DEFAULT_ARGS = {
 DAG_SCHEDULE = "* * * * *"
 REGISTRY_CONN_ID = "airflow_logs_mitratel"
 REGISTRY_TABLE = "public.ck2pg_ingestion_registry"
+SAFE_LOOKBACK_MINUTES_DEFAULT = 1440
+SKEW_TOLERANCE_MINUTES_DEFAULT = 10
 
 # ========= Utilities =========
 def _dt_to_iso(v):
@@ -473,27 +475,56 @@ with DAG(
                 order_sql = ""
 
                 if cursor_col:
+                    # Registry-driven overrides (optional: add these columns in registry to tune per job)
+                    lookback_minutes = int(job.get("lookback_minutes") or SAFE_LOOKBACK_MINUTES_DEFAULT)
+                    skew_tol_minutes = int(job.get("skew_tolerance_minutes") or SKEW_TOLERANCE_MINUTES_DEFAULT)
+
                     # 1) read watermark from target
                     wm_row = writer_pg.get_first(
                         f'SELECT max("{cursor_col}") FROM "{job["target_schema"]}"."{job["target_table"]}"'
                     )
-                    watermark = wm_row[0] if wm_row else None
+                    wm = wm_row[0] if wm_row else None
 
-                    # 2) build WHERE and ORDER for incremental
-                    if watermark is not None:
-                        # use ClickHouse literal helper to be type-accurate
-                        where_sql = f"WHERE {_ch_ident(cursor_col)} > {_ch_lit(watermark)}"
-                    # advance in time deterministically (oldest-first past the watermark)
+                    # 2) probe source bounds to detect runaway watermark
+                    src_bounds_sql = f"SELECT min({_ch_ident(cursor_col)}), max({_ch_ident(cursor_col)}) {base_from}"
+                    src_min, src_max = conn_ch.execute(src_bounds_sql)[0]
+
+                    # 3) normalize watermark
+                    now_utc = datetime.utcnow()
+                    if isinstance(wm, datetime) and wm > (now_utc + timedelta(minutes=skew_tol_minutes)):
+                        # Target watermark is in the future — cap to now to avoid skipping everything
+                        wm = now_utc
+
+                    # 4) compute lower bound with lookback safety
+                    if wm is None:
+                        # no target watermark yet — start from (src_max - lookback) to get "recent" and avoid full scan
+                        lower_bound = (src_max - timedelta(minutes=lookback_minutes)) if src_max else None
+                    else:
+                        lower_bound = wm - timedelta(minutes=lookback_minutes)
+
+                    # 5) handle runaway watermark vs source reality:
+                    #    if target watermark >> source max, pull from (src_max - lookback)
+                    if src_max and lower_bound and lower_bound > src_max:
+                        lower_bound = src_max - timedelta(minutes=lookback_minutes)
+
+                    # 6) build WHERE and ORDER
+                    preds = []
+                    if lower_bound is not None:
+                        preds.append(f"{_ch_ident(cursor_col)} >= {_ch_lit(lower_bound)}")
+                    # If you also want an upper bound (rarely needed):
+                    # preds.append(f"{_ch_ident(cursor_col)} <= {_ch_lit(now_utc)}")
+
+                    if preds:
+                        where_sql = "WHERE " + " AND ".join(preds)
+
+                    # incremental order: oldest first past the lower_bound for deterministic progress
                     order_exprs = [f"{_ch_ident(cursor_col)} ASC"]
                     if pk_cols:
                         order_exprs += [f"{_ch_ident(c)} ASC" for c in pk_cols if c != cursor_col]
                     order_sql = ", ".join(order_exprs)
                 else:
                     # no cursor: deterministic one-batch by PKs (or by all cols)
-                    if pk_cols:
-                        order_sql = ", ".join(_ch_ident(c) for c in pk_cols)
-                    else:
-                        order_sql = ", ".join(_ch_ident(c) for c in cols)
+                    order_sql = ", ".join(_ch_ident(c) for c in (pk_cols or cols))
 
                 sql = f"SELECT {select_cols} {base_from} "
                 if where_sql:

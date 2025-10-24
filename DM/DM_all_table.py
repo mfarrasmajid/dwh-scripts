@@ -485,25 +485,35 @@ with DAG(
                     )
                     wm = wm_row[0] if wm_row else None
 
-                    # 2) probe source bounds to detect runaway watermark
+                    # (NEW) detect if target is empty
+                    has_rows_row = writer_pg.get_first(
+                        f'SELECT EXISTS (SELECT 1 FROM "{job["target_schema"]}"."{job["target_table"]}" LIMIT 1)'
+                    )
+                    is_target_empty = bool(has_rows_row and has_rows_row[0])
+
+                    # 2) probe source bounds
                     src_bounds_sql = f"SELECT min({_ch_ident(cursor_col)}), max({_ch_ident(cursor_col)}) {base_from}"
                     src_min, src_max = conn_ch.execute(src_bounds_sql)[0]
 
                     # 3) normalize watermark
                     now_utc = datetime.utcnow()
                     if isinstance(wm, datetime) and wm > (now_utc + timedelta(minutes=skew_tol_minutes)):
-                        # Target watermark is in the future — cap to now to avoid skipping everything
                         wm = now_utc
 
-                    # 4) compute lower bound with lookback safety
-                    if wm is None:
-                        # no target watermark yet — start from (src_max - lookback) to get "recent" and avoid full scan
-                        lower_bound = (src_max - timedelta(minutes=lookback_minutes)) if src_max else None
+                    # 4) compute lower bound
+                    if is_target_empty:
+                        # INITIAL FULL LOAD: no lower bound (pull from the very beginning)
+                        lower_bound = None
+                        # (optional) for strict determinism, start from the earliest timestamp
+                        # lower_bound = src_min
                     else:
-                        lower_bound = wm - timedelta(minutes=lookback_minutes)
+                        if wm is None:
+                            # fallback (shouldn’t hit if is_target_empty is true)
+                            lower_bound = (src_max - timedelta(minutes=lookback_minutes)) if src_max else None
+                        else:
+                            lower_bound = wm - timedelta(minutes=lookback_minutes)
 
-                    # 5) handle runaway watermark vs source reality:
-                    #    if target watermark >> source max, pull from (src_max - lookback)
+                    # 5) handle runaway watermark vs source reality
                     if src_max and lower_bound and lower_bound > src_max:
                         lower_bound = src_max - timedelta(minutes=lookback_minutes)
 
@@ -511,13 +521,9 @@ with DAG(
                     preds = []
                     if lower_bound is not None:
                         preds.append(f"{_ch_ident(cursor_col)} >= {_ch_lit(lower_bound)}")
-                    # If you also want an upper bound (rarely needed):
-                    # preds.append(f"{_ch_ident(cursor_col)} <= {_ch_lit(now_utc)}")
-
                     if preds:
                         where_sql = "WHERE " + " AND ".join(preds)
 
-                    # incremental order: oldest first past the lower_bound for deterministic progress
                     order_exprs = [f"{_ch_ident(cursor_col)} ASC"]
                     if pk_cols:
                         order_exprs += [f"{_ch_ident(c)} ASC" for c in pk_cols if c != cursor_col]

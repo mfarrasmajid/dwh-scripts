@@ -337,7 +337,7 @@ with DAG(
     default_args=DEFAULT_ARGS,
     schedule_interval=DAG_SCHEDULE,
     catchup=False,
-    tags=["dl", "clickhouse", "postgres", "keyset", "upsert", "sql-only", "single-batch"],
+    tags=["dm", "clickhouse", "postgres", "keyset", "upsert", "sql-only", "single-batch"],
     concurrency=64,
     max_active_runs=1,
 ) as dag:

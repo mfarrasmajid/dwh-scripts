@@ -40,6 +40,13 @@ REGISTRY_TABLE = "public.ck2pg_ingestion_registry"
 SAFE_LOOKBACK_MINUTES_DEFAULT = 1440
 SKEW_TOLERANCE_MINUTES_DEFAULT = 10
 
+def _as_aware_utc(dt):
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 # ========= Utilities =========
 def _dt_to_iso(v):
     return v.isoformat() if isinstance(v, datetime) else v
@@ -100,7 +107,12 @@ def _ch_lit(v) -> str:
     if isinstance(v, (int, float)):
         return str(v)
     if isinstance(v, datetime):
-        return f"toDateTime64('{v.strftime('%Y-%m-%d %H:%M:%S.%f')}', 6)" if v.microsecond else f"toDateTime('{v.strftime('%Y-%m-%d %H:%M:%S')}')"
+        v = _as_aware_utc(v)  # ensure aware UTC
+        s = v.strftime('%Y-%m-%d %H:%M:%S.%f').rstrip('0').rstrip('.')
+        # Use DateTime64 if microseconds exist, else DateTime
+        if v.microsecond:
+            return f"toDateTime64('{s}', 6)"
+        return f"toDateTime('{v.strftime('%Y-%m-%d %H:%M:%S')}')"
     if isinstance(v, date):
         return f"toDate('{v.strftime('%Y-%m-%d')}')"
     s = str(v).replace("'", "\\'")
@@ -483,39 +495,40 @@ with DAG(
                     wm_row = writer_pg.get_first(
                         f'SELECT max("{cursor_col}") FROM "{job["target_schema"]}"."{job["target_table"]}"'
                     )
-                    wm = wm_row[0] if wm_row else None
+                    wm = _as_aware_utc(wm_row[0] if wm_row else None)
 
-                    # (NEW) detect if target is empty
+                    # 1a) rows?
                     has_rows_row = writer_pg.get_first(
                         f'SELECT EXISTS (SELECT 1 FROM "{job["target_schema"]}"."{job["target_table"]}" LIMIT 1)'
                     )
-                    is_target_empty = bool(has_rows_row and has_rows_row[0])
+                    
+                    target_has_rows = bool(has_rows_row and has_rows_row[0])
+                    is_target_empty = not target_has_rows   # must be NOT
 
                     # 2) probe source bounds
                     src_bounds_sql = f"SELECT min({_ch_ident(cursor_col)}), max({_ch_ident(cursor_col)}) {base_from}"
                     src_min, src_max = conn_ch.execute(src_bounds_sql)[0]
+                    src_min = _as_aware_utc(src_min)
+                    src_max = _as_aware_utc(src_max)
 
-                    # 3) normalize watermark
-                    now_utc = datetime.utcnow()
-                    if isinstance(wm, datetime) and wm > (now_utc + timedelta(minutes=skew_tol_minutes)):
+                    # 3) normalize watermark vs now
+                    now_utc = datetime.now(timezone.utc)
+                    if wm and wm > (now_utc + timedelta(minutes=skew_tol_minutes)):
                         wm = now_utc
 
                     # 4) compute lower bound
                     if is_target_empty:
-                        # INITIAL FULL LOAD: no lower bound (pull from the very beginning)
                         lower_bound = None
-                        # (optional) for strict determinism, start from the earliest timestamp
-                        # lower_bound = src_min
                     else:
                         if wm is None:
-                            # fallback (shouldn’t hit if is_target_empty is true)
                             lower_bound = (src_max - timedelta(minutes=lookback_minutes)) if src_max else None
                         else:
                             lower_bound = wm - timedelta(minutes=lookback_minutes)
+                    lower_bound = _as_aware_utc(lower_bound)
 
                     # 5) handle runaway watermark vs source reality
                     if src_max and lower_bound and lower_bound > src_max:
-                        lower_bound = src_max - timedelta(minutes=lookback_minutes)
+                        lower_bound = _as_aware_utc(src_max - timedelta(minutes=lookback_minutes))
 
                     # 6) build WHERE and ORDER
                     preds = []

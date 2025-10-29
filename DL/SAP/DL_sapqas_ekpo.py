@@ -16,7 +16,7 @@ import urllib.parse
 from airflow.models import Variable
 
 # Constants
-BASE_URL = 'http://dmterpqas.mitratel.co.id:8021/sap/opu/odata/sap/ZCDC_EKPO_1_SRV/FactsOfZCDCEKPO?sap-client=200'
+BASE_URL = 'http://dmterpsim.mitratel.co.id:8041/sap/opu/odata/sap/ZCDC_EKPO_1_SRV/FactsOfZCDCEKPO?sap-client=200'
 DELTA_DISCOVERY_URL = 'http://dmterpqas.mitratel.co.id:8021/sap/opu/odata/sap/ZCDC_EKPO_1_SRV/DeltaLinksOfFactsOfZCDCEKPO?sap-client=200'
 NEXT_URL = 'http://dmterpqas.mitratel.co.id:8021/sap/opu/odata/sap/ZCDC_EKPO_1_SRV/'
 HEADERS = {

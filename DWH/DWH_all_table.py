@@ -56,7 +56,29 @@ DAG_SCHEDULE = "* * * * *"   # tick fast; per-job cadence handled via next_run_a
 REGISTRY_CONN_ID = "airflow_logs_mitratel"        # Postgres where registry lives
 REGISTRY_TABLE = "public.ck2ck_ingestion_registry"
 
+# NEW: defaults (align with DM_all_table)
+SAFE_LOOKBACK_MINUTES_DEFAULT = 1440   # 24h
+SKEW_TOLERANCE_MINUTES_DEFAULT = 10    # 10m
+
 # ========= Small helpers =========
+
+def _as_aware_utc(dt):
+    if dt is None:
+        return None
+    if isinstance(dt, datetime):
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    return dt
+
+def _clamp_int(v, lo: int, hi: int, default: int = 0) -> int:
+    try:
+        x = int(v)
+    except Exception:
+        return default
+    return max(lo, min(hi, x))
+
+def _is_datetime_like(base_type: str) -> bool:
+    bt = _strip_nullable(base_type or "")
+    return bt in ("Date", "DateTime") or bt.startswith("DateTime64(")
 
 def _wrap_src_for_from(src_sql: str) -> str:
     clean = _strip_trailing_format(_strip_trailing_semicolon(src_sql))
@@ -548,23 +570,26 @@ with DAG(
             pg = PostgresHook(postgres_conn_id=REGISTRY_CONN_ID)
             rows = pg.get_records(f"""
                 SELECT
-                  id, enabled,
-                  source_ch_conn_id, target_ch_conn_id, pg_log_conn_id,
-                  src_database, src_sql,
-                  target_db, target_table,
-                  pk_cols, version_col,
-                  schedule_type, interval_minutes, cron_expr,
-                  parallel_slices, page_rows,
-                  allow_drop_columns, truncate_before_load,
-                  pre_sql, post_sql,
-                  log_table, log_type, log_kategori,
-                  last_run_at, next_run_at, last_status, last_error
+                id, enabled,
+                source_ch_conn_id, target_ch_conn_id, pg_log_conn_id,
+                src_database, src_sql,
+                target_db, target_table,
+                pk_cols, version_col,
+                schedule_type, interval_minutes, cron_expr,
+                parallel_slices, page_rows,
+                allow_drop_columns, truncate_before_load,
+                pre_sql, post_sql,
+                log_table, log_type, log_kategori,
+                last_run_at, next_run_at, last_status, last_error,
+                COALESCE(safe_lookback_minutes, {SAFE_LOOKBACK_MINUTES_DEFAULT}) AS safe_lookback_minutes,
+                COALESCE(skew_tolerance_minutes, {SKEW_TOLERANCE_MINUTES_DEFAULT}) AS skew_tolerance_minutes
                 FROM {REGISTRY_TABLE}
                 WHERE enabled = TRUE
-                  AND (next_run_at IS NULL OR next_run_at <= now())
+                AND (next_run_at IS NULL OR next_run_at <= now())
                 ORDER BY COALESCE(next_run_at, now()) ASC, id ASC
                 LIMIT 20
             """)
+
             cols = [
                 "id","enabled",
                 "source_ch_conn_id","target_ch_conn_id","pg_log_conn_id",
@@ -576,7 +601,8 @@ with DAG(
                 "allow_drop_columns","truncate_before_load",
                 "pre_sql","post_sql",
                 "log_table","log_type","log_kategori",
-                "last_run_at","next_run_at","last_status","last_error"
+                "last_run_at","next_run_at","last_status","last_error",
+                "safe_lookback_minutes","skew_tolerance_minutes",
             ]
             out: List[Dict[str, Any]] = []
             for r in rows:
@@ -616,9 +642,10 @@ with DAG(
             # 1) Ensure / sync target schema
             proc = f"{job_id}_ensure_and_sync_schema"; pend(proc)
             logger.info(
-                "Job %s target=%s.%s, pk=%s, version=%s, parallel_slices=%s, page_rows=%s",
+                "Job %s target=%s.%s, pk=%s, version=%s, parallel_slices=%s, page_rows=%s, safe_lookback=%s, skew_tol=%s",
                 job_id, job['target_db'], job['target_table'], job['pk_cols'], job.get('version_col'),
-                job.get('parallel_slices'), job.get('page_rows')
+                job.get('parallel_slices'), job.get('page_rows'),
+                job.get('safe_lookback_minutes'), job.get('skew_tolerance_minutes'),
             )
 
             src_hook, _, _ = _get_ch_conn(job["source_ch_conn_id"])
@@ -658,6 +685,7 @@ with DAG(
             ok(proc)
 
             # === Incremental watermark from ORIGINAL version column (ignores NULLs) ===
+            # === Incremental watermark (DM-style): safe lookback + skew tolerance, ignore NULLs ===
             version_col = job.get("version_col")
             wm_value = None
             wm_literal = None
@@ -665,34 +693,79 @@ with DAG(
                 src_types = {c: t for c, t in src_schema}
                 base_type = _strip_nullable(src_types.get(version_col) or "")
 
+                lookback_min = _clamp_int(job.get("safe_lookback_minutes", SAFE_LOOKBACK_MINUTES_DEFAULT), 0, 7*24*60, SAFE_LOOKBACK_MINUTES_DEFAULT)
+                skew_tol_min = _clamp_int(job.get("skew_tolerance_minutes", SKEW_TOLERANCE_MINUTES_DEFAULT), 0, 60, SKEW_TOLERANCE_MINUTES_DEFAULT)
+
+                # 1) read watermark from TARGET (max version)
                 c = ClickHouseHook(clickhouse_conn_id=job["target_ch_conn_id"]).get_conn()
                 try:
-                    row = c.execute(
-                        f"SELECT max(`{version_col}`) FROM `{job['target_db']}`.`{job['target_table']}`"
-                    )
+                    row = c.execute(f"SELECT max(`{version_col}`) FROM `{job['target_db']}`.`{job['target_table']}`")
                     wm_value = row[0][0] if row and row[0] else None
                 finally:
                     try: c.disconnect()
                     except Exception: pass
 
-                def _lit(base_t, v):
-                    if v is None: return None
-                    if base_t.startswith("DateTime64("):
-                        p = base_t[11:-1]
-                        s = v.strftime('%Y-%m-%d %H:%M:%S.%f') if isinstance(v, datetime) else str(v)
-                        return f"toDateTime64('{_esc_single_quotes(s)}', {p})"
-                    if base_t == "DateTime":
-                        s = v.strftime('%Y-%m-%d %H:%M:%S') if isinstance(v, datetime) else str(v)
-                        return f"toDateTime('{_esc_single_quotes(s)}')"
-                    if base_t == "Date":
-                        s = v.strftime('%Y-%m-%d') if isinstance(v, datetime) else str(v)
-                        return f"toDate('{_esc_single_quotes(s)}')"
-                    return str(v)
+                # 2) probe SOURCE bounds for version_col
+                src_client = ClickHouseHook(clickhouse_conn_id=job["source_ch_conn_id"]).get_conn()
+                try:
+                    wrapped_src = _wrap_src_for_from(job["src_sql"])
+                    bounds_sql = f"SELECT min(_s.`{version_col}`), max(_s.`{version_col}`) FROM {wrapped_src}"
+                    bmin, bmax = src_client.execute(bounds_sql)[0]
+                finally:
+                    try: src_client.disconnect()
+                    except Exception: pass
 
-                wm_literal = _lit(base_type, wm_value)
+                # normalize to aware UTC for datetimes
+                now_utc = datetime.now(timezone.utc)
+                if _is_datetime_like(base_type):
+                    wm_value = _as_aware_utc(wm_value)
+                    bmin = _as_aware_utc(bmin)
+                    bmax = _as_aware_utc(bmax)
+
+                    # 3) clamp runaway watermark (target's max ahead of "now" beyond skew)
+                    if wm_value and wm_value > (now_utc + timedelta(minutes=skew_tol_min)):
+                        wm_value = now_utc
+
+                    # 4) compute lower_bound
+                    target_empty = (wm_value is None)
+                    if target_empty:
+                        # fresh load: no lower bound → full pull
+                        lower_bound = None
+                    else:
+                        lower_bound = wm_value - timedelta(minutes=lookback_min)
+
+                    # guard against lower_bound > source max
+                    if bmax and lower_bound and lower_bound > bmax:
+                        lower_bound = bmax - timedelta(minutes=lookback_min)
+                        lower_bound = _as_aware_utc(lower_bound)
+
+                    # 5) final literal
+                    if lower_bound is not None:
+                        # Use >= for overlap window (align with DM code)
+                        if base_type.startswith("DateTime64("):
+                            p = base_type[11:-1]
+                            s = lower_bound.strftime('%Y-%m-%d %H:%M:%S.%f')
+                            wm_literal = f"toDateTime64('{_esc_single_quotes(s)}', {p})"
+                        elif base_type == "DateTime":
+                            s = lower_bound.strftime('%Y-%m-%d %H:%M:%S')
+                            wm_literal = f"toDateTime('{_esc_single_quotes(s)}')"
+                        elif base_type == "Date":
+                            s = lower_bound.strftime('%Y-%m-%d')
+                            wm_literal = f"toDate('{_esc_single_quotes(s)}')"
+                        else:
+                            wm_literal = None  # should not happen for datetime-like
+                    else:
+                        wm_literal = None
+
+                else:
+                    # Non-datetime version columns (e.g., integer); do not time-shift.
+                    # Keep previous behaviour: strict progress by value; no lookback.
+                    wm_literal = str(wm_value) if wm_value is not None else None
+                    bmin = bmin; bmax = bmax  # just for logs
+
                 logger.info(
-                    "Watermark for job %s on %s.%s using version '%s': max=%s, literal=%s",
-                    job_id, job['target_db'], job['target_table'], version_col, wm_value, wm_literal
+                    "WM probe: target.max=%s, src.min=%s, src.max=%s, lookback_min=%s, skew_tol_min=%s, effective_lower_literal=%s",
+                    wm_value, bmin, bmax, lookback_min, skew_tol_min, wm_literal
                 )
 
             # 2) Optional pre_sql
@@ -770,9 +843,10 @@ with DAG(
                     version_pred = None
                     version_nn_guard = None
                     if version_col:
-                        version_nn_guard = f"isNotNull(_s.`{version_col}`)"      # ignore NULLs
+                        version_nn_guard = f"isNotNull(_s.`{version_col}`)"
                     if version_col and wm_literal is not None:
-                        version_pred = f"assumeNotNull(_s.`{version_col}`) > {wm_literal}"  # strictly newer
+                        # DM-style: inclusive lower bound to keep overlap window
+                        version_pred = f"assumeNotNull(_s.`{version_col}`) >= {wm_literal}"
                     
                     single_key = len(pk_tokens_loc) == 1
                     if single_key:

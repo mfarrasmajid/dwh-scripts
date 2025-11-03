@@ -21,7 +21,7 @@ DELTA_DISCOVERY_URL = 'http://dmterpqas.mitratel.co.id:8021/sap/opu/odata/sap/ZC
 NEXT_URL = 'http://dmterpqas.mitratel.co.id:8021/sap/opu/odata/sap/ZCDC_EKPO_1_SRV/'
 HEADERS = {
     'Prefer': 'odata.track-changes,odata.maxpagesize=5000',
-    'Accept-Encoding': 'gzip'
+    'Accept-Encoding': 'gzip, deflate, br'
 }
 USERNAME = Variable.get("sap_user_qas")
 PASSWORD = Variable.get("sap_pass_qas")

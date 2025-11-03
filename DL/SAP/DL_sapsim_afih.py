@@ -19,7 +19,7 @@ BASE_URL = 'http://dmterpsim.mitratel.co.id:8041/sap/opu/odata/sap/ZCDC_AFIH_1_S
 DELTA_DISCOVERY_URL = 'http://dmterpsim.mitratel.co.id:8041/sap/opu/odata/sap/ZCDC_AFIH_1_SRV/DeltaLinksOfFactsOfZCDCAFIH?sap-client=300'
 NEXT_URL = 'http://dmterpsim.mitratel.co.id:8041/sap/opu/odata/sap/ZCDC_AFIH_1_SRV/'
 HEADERS = {
-    'Accept-Encoding': 'gzip',
+    'Accept-Encoding': 'gzip, deflate, br',
     'Prefer': 'odata.track-changes,odata.maxpagesize=5000'
 }
 USERNAME = Variable.get("sap_user_sim")

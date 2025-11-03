@@ -19,7 +19,7 @@ BASE_URL = 'http://dmterpprd2.mitratel.co.id:8031/sap/opu/odata/sap/ZCDC_EKPO_1_
 DELTA_DISCOVERY_URL = 'http://dmterpprd2.mitratel.co.id:8031/sap/opu/odata/sap/ZCDC_EKPO_1_SRV/DeltaLinksOfFactsOfZCDCEKPO?sap-client=300'
 NEXT_URL = 'http://dmterpprd2.mitratel.co.id:8031/sap/opu/odata/sap/ZCDC_EKPO_1_SRV/'
 HEADERS = {
-    'Accept-Encoding': 'gzip',
+    'Accept-Encoding': 'gzip, deflate, br',
     'Prefer': 'odata.track-changes,odata.maxpagesize=10000'
 }
 USERNAME = Variable.get("sap_user_prod")

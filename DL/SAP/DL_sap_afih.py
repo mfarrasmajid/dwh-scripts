@@ -10,7 +10,6 @@ from lxml import etree
 from requests.auth import HTTPBasicAuth
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow_clickhouse_plugin.hooks.clickhouse import ClickHouseHook
-from airflow.operators.bash import BashOperator
 import gzip
 import shutil
 import urllib.parse
@@ -227,17 +226,18 @@ def store_initial_delta_link(**kwargs):
             response = requests.get(DELTA_DISCOVERY_URL, headers=HEADERS, auth=HTTPBasicAuth(USERNAME, PASSWORD), stream=True)
             response.raise_for_status()
 
-            # Read and decompress response content
-            content = b''
+            # Read and decompress response content efficiently
+            chunks = []
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
-                    content += chunk
+                    chunks.append(chunk)
+            content = b''.join(chunks)
             
             # Decompress if needed
             try:
                 content = gzip.decompress(content)
-            except:
-                # Content might not be compressed or already decompressed
+            except gzip.BadGzipFile:
+                # Content is not compressed or already decompressed
                 pass
 
             root = etree.fromstring(content)

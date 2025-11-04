@@ -1070,7 +1070,7 @@ with DAG(
                                     
                                     if delta_token:
                                         sep = '&' if '?' in initial_path else '?'
-                                        delta_url_with_token = _compose_url(base_url, f"{initial_path}{sep}$deltatoken='{delta_token}'", client)
+                                        delta_url_with_token = _compose_url(base_url, f"{initial_path}{sep}!deltatoken='{delta_token}'", client)
                                         LOGGER.info("Job %s env %s delta pull with token: %s", job_code, env, delta_token)
                                         
                                         try:

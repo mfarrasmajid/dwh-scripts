@@ -40,7 +40,13 @@ DEFAULT_ARGS = {
 }
 
 # ===== SAP OData headers / ns =====
-HEADERS = {'Accept-Encoding': 'gzip', 'Prefer': 'odata.track-changes'}
+def _make_headers(maxpagesize: int = 100000) -> dict:
+    """Create headers with dynamic maxpagesize"""
+    return {
+        'Accept-Encoding': 'gzip',
+        'Prefer': f'odata.track-changes,odata.maxpagesize={maxpagesize}'
+    }
+
 OADATA_NS = {
     'atom': 'http://www.w3.org/2005/Atom',
     'm': 'http://schemas.microsoft.com/ado/2007/08/dataservices/metadata',
@@ -114,6 +120,79 @@ def _get_next_delta_url(pg: PostgresHook, job_code: str, env: str) -> Optional[s
 def _set_next_delta_url(pg: PostgresHook, job_code: str, env: str, url: Optional[str]):
     col = f"{env.lower()}_next_delta_url"
     pg.run(f"UPDATE {REGISTRY_TABLE} SET {col}=%s, updated_at=now() WHERE job_code=%s", parameters=(url, job_code))
+
+def _get_delta_token(pg: PostgresHook, job_code: str, env: str) -> Optional[str]:
+    """Get stored delta token for an environment"""
+    col = f"{env.lower()}_delta_token"
+    rows = fetch_dicts(pg, f"SELECT state_json FROM {REGISTRY_TABLE} WHERE job_code=%s", (job_code,))
+    if not rows: return None
+    state = rows[0].get("state_json") or {}
+    if isinstance(state, str):
+        try:
+            state = json.loads(state)
+        except Exception:
+            return None
+    return state.get(col)
+
+def _set_delta_token(pg: PostgresHook, job_code: str, env: str, token: Optional[str]):
+    """Store delta token in state_json"""
+    state = _load_state(pg, job_code)
+    col = f"{env.lower()}_delta_token"
+    state[col] = token
+    _save_state(pg, job_code, state)
+
+def _get_skip_token(pg: PostgresHook, job_code: str, env: str) -> Optional[str]:
+    """Get stored skip token for an environment"""
+    col = f"{env.lower()}_skip_token"
+    rows = fetch_dicts(pg, f"SELECT state_json FROM {REGISTRY_TABLE} WHERE job_code=%s", (job_code,))
+    if not rows: return None
+    state = rows[0].get("state_json") or {}
+    if isinstance(state, str):
+        try:
+            state = json.loads(state)
+        except Exception:
+            return None
+    return state.get(col)
+
+def _set_skip_token(pg: PostgresHook, job_code: str, env: str, token: Optional[str]):
+    """Store skip token in state_json"""
+    state = _load_state(pg, job_code)
+    col = f"{env.lower()}_skip_token"
+    state[col] = token
+    _save_state(pg, job_code, state)
+
+def _get_initial_completed_at(pg: PostgresHook, job_code: str, env: str) -> Optional[datetime]:
+    """Get initial load completion timestamp"""
+    col = f"{env.lower()}_initial_completed_at"
+    rows = fetch_dicts(pg, f"SELECT state_json FROM {REGISTRY_TABLE} WHERE job_code=%s", (job_code,))
+    if not rows: return None
+    state = rows[0].get("state_json") or {}
+    if isinstance(state, str):
+        try:
+            state = json.loads(state)
+        except Exception:
+            return None
+    ts = state.get(col)
+    if ts:
+        try:
+            return datetime.fromisoformat(ts) if isinstance(ts, str) else ts
+        except Exception:
+            return None
+    return None
+
+def _set_initial_completed_at(pg: PostgresHook, job_code: str, env: str, dt: datetime):
+    """Store initial load completion timestamp"""
+    state = _load_state(pg, job_code)
+    col = f"{env.lower()}_initial_completed_at"
+    state[col] = dt.isoformat()
+    _save_state(pg, job_code, state)
+
+def _get_delta_links_path(entity_name: str) -> str:
+    """Generate DeltaLinksOf path from entity name"""
+    # From FactsOfZCDCAFIH -> DeltaLinksOfFactsOfZCDCAFIH
+    if entity_name.startswith("FactsOf"):
+        return f"DeltaLinksOf{entity_name}"
+    return f"DeltaLinksOfFactsOf{entity_name}"
 
 def _abs_delta_url(base_url: str, href: str) -> str:
     b = base_url if base_url.endswith('/') else base_url + '/'
@@ -288,7 +367,23 @@ def _props_from_entry(entry: ET.Element) -> Dict[str,Any]:
         props[name] = el.text if el.text is not None else None
     return props
 
-def _parse_feed(xml_bytes: bytes) -> Tuple[List[Dict[str,Any]], Optional[str], Optional[str], List[str]]:
+def _extract_skiptoken_from_feed(xml_bytes: bytes) -> Optional[str]:
+    """Extract skiptoken from <link rel='next'> in feed"""
+    try:
+        tree = ET.fromstring(xml_bytes)
+        next_link = tree.find("atom:link[@rel='next']", OADATA_NS)
+        if next_link is not None:
+            href = next_link.get('href', '')
+            # Extract skiptoken from href like: FactsOf...?sap-client=300&InitialLoad=true&$skiptoken=XXX
+            match = re.search(r'[&?]\$skiptoken=([^&]+)', href)
+            if match:
+                return match.group(1)
+    except Exception:
+        pass
+    return None
+
+def _parse_feed(xml_bytes: bytes) -> Tuple[List[Dict[str,Any]], Optional[str], Optional[str], List[str], Optional[str]]:
+    """Parse feed and return entries, change_link, delta_token, pk_cols, skip_token"""
     tree = ET.fromstring(xml_bytes)
     entries = [_props_from_entry(e) for e in tree.findall('atom:entry', OADATA_NS)]
     change_link, delta_token = None, None
@@ -306,7 +401,8 @@ def _parse_feed(xml_bytes: bytes) -> Tuple[List[Dict[str,Any]], Optional[str], O
             delta_token = tok.text
             break
     pk_cols = _first_entry_pk_cols(xml_bytes)
-    return entries, change_link, delta_token, pk_cols
+    skip_token = _extract_skiptoken_from_feed(xml_bytes)
+    return entries, change_link, delta_token, pk_cols, skip_token
 
 def _schema_sync(ch: ClickHouseHook, db: str, table: str,
                  rows: List[Dict[str,Any]],
@@ -402,10 +498,16 @@ def _insert_rows(ch, db, table, env, rows, batch_id, is_delete=0, batch_row_coun
     sql = f"INSERT INTO {full} ({','.join(f'`{c}`' for c in cols)}) VALUES"
     ck_insert(ch, sql, [{c: row.get(c) for c in cols} for row in data])
 
-def _get_initial_page(session: requests.Session, url_base: str, skip: int, top: int, auth: Tuple[str,str]) -> bytes:
+def _get_initial_page(session: requests.Session, url_base: str, auth: Tuple[str,str], maxpagesize: int = 100000, use_initial_load: bool = True) -> bytes:
+    """Fetch initial page with InitialLoad=true parameter"""
     sep = '&' if '?' in url_base else '?'
-    url = f"{url_base}{sep}$skip={skip}&$top={top}"
-    resp = session.get(url, auth=auth, headers=HEADERS, timeout=120)
+    if use_initial_load:
+        url = f"{url_base}{sep}InitialLoad=true"
+    else:
+        # Fallback without InitialLoad (rarely used)
+        url = url_base
+    headers = _make_headers(maxpagesize)
+    resp = session.get(url, auth=auth, headers=headers, timeout=120)
     if DEBUG:
         LOGGER.info("[DEBUG] GET %s | status=%s | ce=%s | ct=%s | len=%s | head=%r",
                     url, resp.status_code,
@@ -416,8 +518,10 @@ def _get_initial_page(session: requests.Session, url_base: str, skip: int, top: 
     resp.raise_for_status()
     return _gzip_aware(resp)
 
-def _get_url(session: requests.Session, url: str, auth: Tuple[str,str]) -> bytes:
-    resp = session.get(url, auth=auth, headers=HEADERS, timeout=120)
+def _get_url(session: requests.Session, url: str, auth: Tuple[str,str], maxpagesize: int = 100000, add_headers: bool = True) -> bytes:
+    """Fetch URL with optional headers"""
+    headers = _make_headers(maxpagesize) if add_headers else {}
+    resp = session.get(url, auth=auth, headers=headers, timeout=120)
     if DEBUG:
         LOGGER.info("[DEBUG] GET %s | status=%s | ce=%s | ct=%s | len=%s | head=%r",
                     url, resp.status_code,
@@ -570,7 +674,8 @@ with DAG(
         cron_expr = job.get("cron_expr")
         initial_path = job["initial_path"].strip()
         delta_path   = (job.get("delta_path") or initial_path).strip()
-        top          = int(job.get("initial_top") or 5000)
+        maxpagesize  = int(job.get("maxpagesize") or 100000)  # Configurable maxpagesize for OData
+        entity_name  = job.get("entity_name", "")  # For DeltaLinksOf path (fallback if delta_path not set)
         force_initial = bool(job.get("trigger_force_initial") or dag_conf.get("force_initial"))
         run_now       = bool(job.get("trigger_run_now") or dag_conf.get("run_now"))
 
@@ -645,7 +750,7 @@ with DAG(
                 log_hook, job_code, env, "setup",
                 mark=batch_id, ck_db=db, ck_table=table,
                 msg=f"base_url={base_url} initial_url={initial_url} delta_url={delta_url} "
-                    f"top={top} force_initial={force_initial} initial_done={initial_done}"
+                    f"maxpagesize={maxpagesize} force_initial={force_initial} initial_done={initial_done}"
             )
             log_debug("HTTP auth resolved", env=env, user=auth[0])
 
@@ -669,49 +774,74 @@ with DAG(
                         initial_done = False
 
                         with phase_logger(log_hook, f"{job_code}:{env}:initial", batch_id, db, table):
+                            use_initial_load = True
+                            stored_skip_token = None
+                            page_count = 0
+                            
                             while True:
-                                with page_logger(log_hook, job_code, env, "initial", batch_id, db, table, skip=next_skip, top=top) as page_ok:
+                                page_count += 1
+                                
+                                if stored_skip_token:
+                                    # Continue with skip token
+                                    sep = '&' if '?' in initial_url else '?'
+                                    url_to_use = f"{initial_url}{sep}$skiptoken={stored_skip_token}"
+                                    LOGGER.info("Job %s env %s weekly refresh continuing with skiptoken (page %d)", 
+                                               job_code, env, page_count)
                                     try:
-                                        xml_bytes = _get_initial_page(session, initial_url, next_skip, top, auth)
+                                        xml_bytes = _get_url(session, url_to_use, auth, maxpagesize=maxpagesize)
                                     except Exception:
-                                        LOGGER.exception("Job %s env %s initial HTTP error at skip=%s top=%s", job_code, env, next_skip, top)
+                                        LOGGER.exception("Job %s env %s weekly refresh skiptoken error", job_code, env)
                                         raise
-                                    rows, _, _, pk_cols = _parse_feed(xml_bytes)
-                                    if pk_cols and not pk_cols_current:
-                                        pk_cols_current = pk_cols
-                                        maybe_persist_pk(pk_cols_current)  # FIX
-                                        LOGGER.info("Job %s env %s detected PK columns: %s", job_code, env, pk_cols_current)
-                                    if DEBUG:
-                                        snippet = xml_bytes[:200].decode('utf-8', errors='ignore')
-                                        log_debug("Initial XML snippet", env=env, skip=next_skip, top=top, snippet=snippet)
-
-                                    if next_skip == 0 and rows:
-                                        _schema_sync(ch, db, table, rows, pk_cols=pk_cols_current or None)  # FIX
-                                        LOGGER.info("Job %s env %s schema synced with %d columns", job_code, env, len(rows[0]))
-
-                                    batch = len(rows)
-                                    LOGGER.info("Job %s env %s initial page pulled=%d (skip=%d top=%d)", job_code, env, batch, next_skip, top)
-                                    if batch == 0:
-                                        page_ok(0); initial_done = True; break
-
-                                    _insert_rows(ch, db, table, env, rows, batch_id, batch_row_count=batch, pk_cols=pk_cols_current or None)  # FIX
-                                    LOGGER.info("Job %s env %s inserted %d rows into %s.%s", job_code, env, batch, db, table)
-
-                                    page_ok(batch)
-                                    next_skip += batch
-                                    if batch < top:
-                                        initial_done = True; break
+                                else:
+                                    LOGGER.info("Job %s env %s weekly refresh page %d (InitialLoad=%s)", 
+                                               job_code, env, page_count, use_initial_load)
+                                    try:
+                                        xml_bytes = _get_initial_page(session, initial_url, auth, 
+                                                                     maxpagesize=maxpagesize, use_initial_load=use_initial_load)
+                                    except Exception:
+                                        LOGGER.exception("Job %s env %s weekly refresh HTTP error", job_code, env)
+                                        raise
+                                
+                                rows, _, _, pk_cols, skip_token = _parse_feed(xml_bytes)
+                                
+                                if pk_cols and not pk_cols_current:
+                                    pk_cols_current = pk_cols
+                                    maybe_persist_pk(pk_cols_current)
+                                    LOGGER.info("Job %s env %s detected PK columns: %s", job_code, env, pk_cols_current)
+                                
+                                if page_count == 1 and rows:
+                                    _schema_sync(ch, db, table, rows, pk_cols=pk_cols_current or None)
+                                    LOGGER.info("Job %s env %s schema synced", job_code, env)
+                                
+                                batch = len(rows)
+                                LOGGER.info("Job %s env %s weekly refresh page %d pulled=%d", job_code, env, page_count, batch)
+                                
+                                if batch == 0:
+                                    initial_done = True
+                                    break
+                                
+                                _insert_rows(ch, db, table, env, rows, batch_id, batch_row_count=batch, pk_cols=pk_cols_current or None)
+                                LOGGER.info("Job %s env %s inserted %d rows", job_code, env, batch)
+                                
+                                if skip_token:
+                                    stored_skip_token = skip_token
+                                    use_initial_load = False
+                                    LOGGER.info("Job %s env %s saved skiptoken for next page", job_code, env)
+                                else:
+                                    initial_done = True
+                                    break
 
                         last_run = now
                         next_run = _compute_next_run(stype, interval_minutes, cron_expr, last_run)
                         _update_env_runtime(pg, job_code, env, "success", None, last_run, next_run,
-                                            next_skip=next_skip, initial_done=initial_done)
-                        _set_next_delta_url(pg, job_code, env, None)
-                        LOGGER.info("Job %s env %s completed weekly_refresh | next_skip=%d initial_done=%s next_run=%s",
-                                    job_code, env, next_skip, initial_done, next_run)
+                                            next_skip=0, initial_done=initial_done)
+                        _set_delta_token(pg, job_code, env, None)
+                        _set_skip_token(pg, job_code, env, None)
+                        LOGGER.info("Job %s env %s completed weekly_refresh | initial_done=%s next_run=%s",
+                                    job_code, env, initial_done, next_run)
 
                     else:
-                        # continuous_cdc
+                        # continuous_cdc - NEW IMPLEMENTATION
                         if force_initial:
                             with phase_logger(log_hook, f"{job_code}:{env}:truncate", batch_id, db, table):
                                 ck_exec(ch, f"CREATE DATABASE IF NOT EXISTS {db}")
@@ -719,98 +849,213 @@ with DAG(
                                 LOGGER.info("Job %s env %s forced truncate %s.%s", job_code, env, db, table)
                             next_skip = 0
                             initial_done = False
-                            _set_next_delta_url(pg, job_code, env, None)
-                            state.pop(f"{env.lower()}_next_delta_url", None)
-                            _save_state(pg, job_code, state)
-                            LOGGER.info("Job %s env %s cleared delta pointer", job_code, env)
+                            _set_delta_token(pg, job_code, env, None)
+                            _set_skip_token(pg, job_code, env, None)
+                            _set_initial_completed_at(pg, job_code, env, datetime(1970, 1, 1))
+                            LOGGER.info("Job %s env %s cleared all CDC state", job_code, env)
 
+                        # STEP 1: Initial load with InitialLoad=true and skiptoken continuation
                         if not initial_done:
+                            stored_skip_token = _get_skip_token(pg, job_code, env)
+                            
                             with phase_logger(log_hook, f"{job_code}:{env}:initial", batch_id, db, table):
+                                use_initial_load = (stored_skip_token is None)
+                                page_count = 0
+                                
                                 while True:
-                                    with page_logger(log_hook, job_code, env, "initial", batch_id, db, table, skip=next_skip, top=top) as page_ok:
+                                    page_count += 1
+                                    
+                                    if stored_skip_token:
+                                        # Continue with skip token
+                                        sep = '&' if '?' in initial_url else '?'
+                                        url_to_use = f"{initial_url}{sep}$skiptoken={stored_skip_token}"
+                                        LOGGER.info("Job %s env %s continuing with skiptoken (page %d)", job_code, env, page_count)
                                         try:
-                                            xml_bytes = _get_initial_page(session, initial_url, next_skip, top, auth)
+                                            xml_bytes = _get_url(session, url_to_use, auth, maxpagesize=maxpagesize)
                                         except Exception:
-                                            LOGGER.exception("Job %s env %s initial HTTP error at skip=%s top=%s", job_code, env, next_skip, top)
+                                            LOGGER.exception("Job %s env %s skiptoken HTTP error", job_code, env)
                                             raise
-                                        rows, _, _, pk_cols = _parse_feed(xml_bytes)
-                                        if pk_cols and not pk_cols_current:
-                                            pk_cols_current = pk_cols
-                                            maybe_persist_pk(pk_cols_current)  # FIX
-                                            LOGGER.info("Job %s env %s detected PK columns: %s", job_code, env, pk_cols_current)
-                                        if DEBUG:
-                                            snippet = xml_bytes[:200].decode('utf-8', errors='ignore')
-                                            log_debug("Initial XML snippet", env=env, skip=next_skip, top=top, snippet=snippet)
-
-                                        if next_skip == 0 and rows:
-                                            _schema_sync(ch, db, table, rows, pk_cols=pk_cols_current or None)  # FIX
-                                            LOGGER.info("Job %s env %s schema synced with %d columns", job_code, env, len(rows[0]))
-
-                                        batch = len(rows)
-                                        LOGGER.info("Job %s env %s initial page pulled=%d (skip=%d top=%d)", job_code, env, batch, next_skip, top)
-                                        if batch == 0:
-                                            page_ok(0); initial_done = True; break
-                                        _insert_rows(ch, db, table, env, rows, batch_id, batch_row_count=batch, pk_cols=pk_cols_current or None)  # FIX
-                                        LOGGER.info("Job %s env %s inserted %d rows into %s.%s", job_code, env, batch, db, table)
-                                        page_ok(batch)
-                                        next_skip += batch
-                                        if batch < top:
-                                            initial_done = True; break
-
-                        with phase_logger(log_hook, f"{job_code}:{env}:delta", batch_id, db, table):
-                            # DB-stored pointer takes precedence
-                            next_delta_url = _get_next_delta_url(pg, job_code, env)
-
-                            service_root: Optional[str] = None
-
-                            if not next_delta_url:
-                                xml_bytes = _get_url(session, delta_url, auth)
-                                rows0, change_link, delta_token, pk_cols_next = _parse_feed(xml_bytes)
-                                if pk_cols_next and not pk_cols_current:
-                                    pk_cols_current = pk_cols_next
-                                    maybe_persist_pk(pk_cols_current)  # FIX
-                                    LOGGER.info("Job %s env %s detected PK columns (delta seed): %s", job_code, env, pk_cols_current)
-
-                                service_root = _feed_service_root(xml_bytes, fallback_from_url=delta_url) or (base_url.rstrip("/") + "/")
-                                if change_link:
-                                    next_delta_url = change_link if change_link.startswith("http") else _abs_delta_url(service_root, change_link)
-                                elif delta_token:
-                                    sep = '&' if '?' in delta_url else '?'
-                                    next_delta_url = f"{delta_url}{sep}$deltatoken={delta_token}"
-
-                                _set_next_delta_url(pg, job_code, env, next_delta_url)
-                                LOGGER.info("Job %s env %s seeded delta url: %s (service_root=%s)", job_code, env, next_delta_url, service_root)
-
-                            if next_delta_url:
-                                xml_bytes = _get_url(session, next_delta_url, auth)
-                                rows, change_link_next, delta_token_next, pk_cols_next = _parse_feed(xml_bytes)
-                                if pk_cols_next and not pk_cols_current:
-                                    pk_cols_current = pk_cols_next
-                                    maybe_persist_pk(pk_cols_current)  # FIX
-                                    LOGGER.info("Job %s env %s detected PK columns (delta): %s", job_code, env, pk_cols_current)
-
-                                if rows:
-                                    _schema_sync(ch, db, table, rows, pk_cols=pk_cols_current or None)  # FIX
-                                    _insert_rows(ch, db, table, env, rows, batch_id, batch_row_count=len(rows), pk_cols=pk_cols_current or None)  # FIX
-                                    LOGGER.info("Job %s env %s inserted delta rows=%d into %s.%s", job_code, env, len(rows), db, table)
-
-                                service_root_next = _feed_service_root(xml_bytes, fallback_from_url=delta_url) or (base_url.rstrip("/") + "/")
-
-                                if change_link_next:
-                                    next_delta_url = change_link_next if change_link_next.startswith("http") else _abs_delta_url(service_root_next, change_link_next)
-                                elif delta_token_next:
-                                    sep = '&' if '?' in delta_url else '?'
-                                    next_delta_url = f"{delta_url}{sep}$deltatoken={delta_token_next}"
-
-                                _set_next_delta_url(pg, job_code, env, next_delta_url)
-                                LOGGER.info("Job %s env %s advanced delta pointer → %s", job_code, env, next_delta_url)
+                                    else:
+                                        # Initial load or regular pagination
+                                        LOGGER.info("Job %s env %s initial load page %d (InitialLoad=%s)", 
+                                                   job_code, env, page_count, use_initial_load)
+                                        try:
+                                            xml_bytes = _get_initial_page(session, initial_url, auth, 
+                                                                         maxpagesize=maxpagesize, use_initial_load=use_initial_load)
+                                        except Exception:
+                                            LOGGER.exception("Job %s env %s initial HTTP error", job_code, env)
+                                            raise
+                                    
+                                    rows, _, _, pk_cols, skip_token = _parse_feed(xml_bytes)
+                                    
+                                    if pk_cols and not pk_cols_current:
+                                        pk_cols_current = pk_cols
+                                        maybe_persist_pk(pk_cols_current)
+                                        LOGGER.info("Job %s env %s detected PK columns: %s", job_code, env, pk_cols_current)
+                                    
+                                    if page_count == 1 and rows:
+                                        _schema_sync(ch, db, table, rows, pk_cols=pk_cols_current or None)
+                                        LOGGER.info("Job %s env %s schema synced", job_code, env)
+                                    
+                                    batch = len(rows)
+                                    LOGGER.info("Job %s env %s initial page %d pulled=%d records", job_code, env, page_count, batch)
+                                    
+                                    if batch == 0:
+                                        # No more data
+                                        initial_done = True
+                                        _set_skip_token(pg, job_code, env, None)
+                                        _set_initial_completed_at(pg, job_code, env, datetime.now())
+                                        LOGGER.info("Job %s env %s initial load complete", job_code, env)
+                                        break
+                                    
+                                    _insert_rows(ch, db, table, env, rows, batch_id, batch_row_count=batch, pk_cols=pk_cols_current or None)
+                                    LOGGER.info("Job %s env %s inserted %d rows", job_code, env, batch)
+                                    
+                                    if skip_token:
+                                        # Save skip token and continue
+                                        _set_skip_token(pg, job_code, env, skip_token)
+                                        stored_skip_token = skip_token
+                                        use_initial_load = False
+                                        LOGGER.info("Job %s env %s saved skiptoken for next page", job_code, env)
+                                    else:
+                                        # No more pages
+                                        initial_done = True
+                                        _set_skip_token(pg, job_code, env, None)
+                                        _set_initial_completed_at(pg, job_code, env, datetime.now())
+                                        LOGGER.info("Job %s env %s initial load complete (no skip token)", job_code, env)
+                                        break
+                            
+                            # STEP 2: Get initial delta token from DeltaLinksOf endpoint
+                            if initial_done:
+                                # Use delta_path from registry if available, otherwise construct from entity_name
+                                if delta_path and delta_path != initial_path:
+                                    delta_links_url = _compose_url(base_url, delta_path, client)
+                                else:
+                                    delta_links_path = _get_delta_links_path(entity_name)
+                                    delta_links_url = _compose_url(base_url, delta_links_path, client)
+                                LOGGER.info("Job %s env %s fetching delta token from %s", job_code, env, delta_links_url)
+                                
+                                try:
+                                    xml_bytes = _get_url(session, delta_links_url, auth, add_headers=False)
+                                    _, _, delta_token, _, _ = _parse_feed(xml_bytes)
+                                    if delta_token:
+                                        _set_delta_token(pg, job_code, env, delta_token)
+                                        LOGGER.info("Job %s env %s saved initial delta token: %s", job_code, env, delta_token)
+                                    else:
+                                        LOGGER.warning("Job %s env %s no delta token found in DeltaLinksOf response", job_code, env)
+                                except Exception:
+                                    LOGGER.exception("Job %s env %s failed to fetch initial delta token", job_code, env)
+                                
+                                # Wait 10 minutes for parsing
+                                LOGGER.info("Job %s env %s waiting 10 minutes for SAP parsing completion", job_code, env)
+                        
+                        # STEP 3: Check if we can do delta pull (10 minutes passed)
+                        if initial_done:
+                            initial_completed = _get_initial_completed_at(pg, job_code, env)
+                            if initial_completed:
+                                elapsed = (now - initial_completed).total_seconds() / 60.0
+                                if elapsed < 10:
+                                    LOGGER.info("Job %s env %s waiting for parsing: %.1f/10 min elapsed", 
+                                               job_code, env, elapsed)
+                                    # Update runtime and exit
+                                    last_run = now
+                                    next_run = _compute_next_run(stype, interval_minutes, cron_expr, last_run)
+                                    _update_env_runtime(pg, job_code, env, "success", None, last_run, next_run,
+                                                       next_skip=0, initial_done=initial_done)
+                                    continue
+                            
+                            # Check if we have skip token from previous delta run
+                            stored_skip_token = _get_skip_token(pg, job_code, env)
+                            
+                            if stored_skip_token:
+                                # Continue skip token from previous delta
+                                with phase_logger(log_hook, f"{job_code}:{env}:delta_skip", batch_id, db, table):
+                                    LOGGER.info("Job %s env %s continuing delta with skiptoken", job_code, env)
+                                    sep = '&' if '?' in initial_path else '?'
+                                    skip_url = _compose_url(base_url, f"{initial_path}{sep}$skiptoken={stored_skip_token}", client)
+                                    
+                                    try:
+                                        xml_bytes = _get_url(session, skip_url, auth, maxpagesize=maxpagesize)
+                                        rows, _, _, pk_cols_d, skip_token = _parse_feed(xml_bytes)
+                                        
+                                        if pk_cols_d and not pk_cols_current:
+                                            pk_cols_current = pk_cols_d
+                                            maybe_persist_pk(pk_cols_current)
+                                        
+                                        if rows:
+                                            _schema_sync(ch, db, table, rows, pk_cols=pk_cols_current or None)
+                                            _insert_rows(ch, db, table, env, rows, batch_id, batch_row_count=len(rows), 
+                                                       pk_cols=pk_cols_current or None)
+                                            LOGGER.info("Job %s env %s inserted %d delta skip rows", job_code, env, len(rows))
+                                        
+                                        if skip_token:
+                                            _set_skip_token(pg, job_code, env, skip_token)
+                                            LOGGER.info("Job %s env %s saved new skiptoken", job_code, env)
+                                        else:
+                                            _set_skip_token(pg, job_code, env, None)
+                                            LOGGER.info("Job %s env %s cleared skiptoken", job_code, env)
+                                    except Exception:
+                                        LOGGER.exception("Job %s env %s delta skip token error", job_code, env)
+                                        raise
+                            else:
+                                # Do delta pull with delta token
+                                with phase_logger(log_hook, f"{job_code}:{env}:delta", batch_id, db, table):
+                                    delta_token = _get_delta_token(pg, job_code, env)
+                                    
+                                    if delta_token:
+                                        sep = '&' if '?' in initial_path else '?'
+                                        delta_url_with_token = _compose_url(base_url, f"{initial_path}{sep}$deltatoken={delta_token}", client)
+                                        LOGGER.info("Job %s env %s delta pull with token: %s", job_code, env, delta_token)
+                                        
+                                        try:
+                                            xml_bytes = _get_url(session, delta_url_with_token, auth, maxpagesize=maxpagesize)
+                                            rows, _, _, pk_cols_d, skip_token = _parse_feed(xml_bytes)
+                                            
+                                            if pk_cols_d and not pk_cols_current:
+                                                pk_cols_current = pk_cols_d
+                                                maybe_persist_pk(pk_cols_current)
+                                            
+                                            if rows:
+                                                _schema_sync(ch, db, table, rows, pk_cols=pk_cols_current or None)
+                                                _insert_rows(ch, db, table, env, rows, batch_id, batch_row_count=len(rows), 
+                                                           pk_cols=pk_cols_current or None)
+                                                LOGGER.info("Job %s env %s inserted %d delta rows", job_code, env, len(rows))
+                                            
+                                            if skip_token:
+                                                # New skip token during delta
+                                                _set_skip_token(pg, job_code, env, skip_token)
+                                                LOGGER.info("Job %s env %s delta returned skiptoken", job_code, env)
+                                            else:
+                                                # No skip token, fetch new delta token
+                                                _set_skip_token(pg, job_code, env, None)
+                                                # Use delta_path from registry if available
+                                                if delta_path and delta_path != initial_path:
+                                                    delta_links_url = _compose_url(base_url, delta_path, client)
+                                                else:
+                                                    delta_links_path = _get_delta_links_path(entity_name)
+                                                    delta_links_url = _compose_url(base_url, delta_links_path, client)
+                                                LOGGER.info("Job %s env %s fetching new delta token from %s", job_code, env, delta_links_url)
+                                                
+                                                try:
+                                                    xml_bytes_dt = _get_url(session, delta_links_url, auth, add_headers=False)
+                                                    _, _, new_delta_token, _, _ = _parse_feed(xml_bytes_dt)
+                                                    if new_delta_token:
+                                                        _set_delta_token(pg, job_code, env, new_delta_token)
+                                                        LOGGER.info("Job %s env %s updated delta token: %s", job_code, env, new_delta_token)
+                                                except Exception:
+                                                    LOGGER.exception("Job %s env %s failed to fetch new delta token", job_code, env)
+                                        except Exception:
+                                            LOGGER.exception("Job %s env %s delta pull error", job_code, env)
+                                            raise
+                                    else:
+                                        LOGGER.warning("Job %s env %s no delta token available", job_code, env)
 
                         last_run = now
                         next_run = _compute_next_run(stype, interval_minutes, cron_expr, last_run)
                         _update_env_runtime(pg, job_code, env, "success", None, last_run, next_run,
-                                            next_skip=next_skip, initial_done=initial_done)
-                        LOGGER.info("Job %s env %s completed continuous_cdc | next_skip=%d initial_done=%s next_run=%s",
-                                    job_code, env, next_skip, initial_done, next_run)
+                                            next_skip=0, initial_done=initial_done)
+                        LOGGER.info("Job %s env %s completed continuous_cdc | initial_done=%s next_run=%s",
+                                    job_code, env, initial_done, next_run)
 
                 except Exception as e:
                     LOGGER.exception("Job %s env %s failed", job_code, env)

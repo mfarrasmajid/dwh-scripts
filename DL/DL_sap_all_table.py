@@ -981,9 +981,11 @@ with DAG(
                                         _set_skip_token(pg, job_code, env, None)
                                         _set_initial_completed_at(pg, job_code, env, datetime.now())
                                         LOGGER.info("Job %s env %s initial load complete (no skip token)", job_code, env)
-                            
-                            # STEP 2: Get initial delta token from DeltaLinksOf endpoint
-                            if initial_done:
+                        
+                        # STEP 2: Get initial delta token from DeltaLinksOf endpoint (only if we don't have one yet)
+                        if initial_done:
+                            current_delta_token = _get_delta_token(pg, job_code, env)
+                            if not current_delta_token:
                                 # Use delta_path from registry if available, otherwise construct from entity_name
                                 if delta_path and delta_path != initial_path:
                                     delta_links_url = _compose_url(base_url, delta_path, client)

@@ -45,7 +45,7 @@ def main():
     group_name = f"ch_consumer_pg_{uuid.uuid4().hex[:16]}"
 
     kafka_brokers = Variable.get("kafka_broker_list", default_var="192.168.101.164:9092")
-    pg_topic = Variable.get("debezium_pg_topic", default_var="postgres-mass-server-4.all-dbs")
+    pg_topic = Variable.get("debezium_pg_topic", default_var="postgres-mass-server-x.all-dbs")
 
     # Kafka Source Table
     ch_client.execute(f"""

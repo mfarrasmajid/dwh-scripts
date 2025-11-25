@@ -319,10 +319,18 @@ def _upsert_rows_pg(
     conflict_csv = ", ".join(f'"{c}"' for c in conflict_cols)
     select_proj = _build_projection_with_casts(columns, pg_type_by_col)
     select_csv = ", ".join(select_proj)
-    if version_col and version_col in columns:
-        order_by = ", ".join([f'v."{c}"' for c in conflict_cols] + [f'v."{version_col}" DESC NULLS LAST'])
-    else:
-        order_by = ", ".join(f'v."{c}"' for c in conflict_cols) if conflict_cols else "1"
+    
+    # Build DISTINCT ON and ORDER BY - they must match
+    distinct_on_cols = list(conflict_cols)
+    order_by_parts = [f'v."{c}"' for c in conflict_cols]
+    
+    if version_col and version_col in columns and version_col not in conflict_cols:
+        distinct_on_cols.append(version_col)
+        order_by_parts.append(f'v."{version_col}" DESC NULLS LAST')
+    
+    distinct_on_csv = ", ".join(f'v."{c}"' for c in distinct_on_cols)
+    order_by = ", ".join(order_by_parts) if order_by_parts else "1"
+    
     set_list = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in columns if c not in conflict_cols)
     tgt = f'"{schema}"."{table}"'
     diff_pred = " OR ".join(
@@ -332,7 +340,7 @@ def _upsert_rows_pg(
     where_guard = f" WHERE {diff_pred}" if diff_pred else ""
     sql = f'''
         INSERT INTO "{schema}"."{table}" ({cols_csv})
-        SELECT DISTINCT ON ({conflict_csv}) {select_csv}
+        SELECT DISTINCT ON ({distinct_on_csv}) {select_csv}
         FROM (VALUES %s) AS v ({cols_csv})
         ORDER BY {order_by}
         ON CONFLICT ({conflict_csv}) DO UPDATE

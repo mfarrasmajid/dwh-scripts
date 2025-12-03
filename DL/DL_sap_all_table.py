@@ -1075,10 +1075,65 @@ with DAG(
                                         delta_url_with_token = _compose_url(base_url, f"{initial_path}{sep}!deltatoken='{delta_token}'", client)
                                         LOGGER.info("Job %s env %s delta pull with token: %s", job_code, env, delta_token)
                                         
+                                        delta_expired = False
+                                        rows = None
+                                        pk_cols_d = None
+                                        skip_token = None
+                                        
                                         try:
                                             xml_bytes = _get_url(session, delta_url_with_token, auth, maxpagesize=maxpagesize)
                                             rows, _, _, pk_cols_d, skip_token = _parse_feed(xml_bytes)
+                                        except requests.exceptions.HTTPError as http_err:
+                                            # Check if delta token expired (400 Bad Request or 500 Internal Server Error)
+                                            if http_err.response is not None and http_err.response.status_code in (400, 500):
+                                                LOGGER.warning("Job %s env %s delta token expired (HTTP %s), will refresh subscriber",
+                                                             job_code, env, http_err.response.status_code)
+                                                delta_expired = True
+                                            else:
+                                                raise
+                                        
+                                        if delta_expired:
+                                            # REFRESH SUBSCRIBER: Pull only 1 batch to trigger subscriber, then wait 10 minutes
+                                            LOGGER.info("Job %s env %s refreshing expired delta subscriber (1 batch only)", job_code, env)
                                             
+                                            # Clear all CDC state
+                                            _set_delta_token(pg, job_code, env, None)
+                                            _set_skip_token(pg, job_code, env, None)
+                                            _set_initial_completed_at(pg, job_code, env, datetime(1970, 1, 1))
+                                            
+                                            # Pull only 1 batch of initial data to trigger subscriber
+                                            LOGGER.info("Job %s env %s pulling 1 batch to trigger subscriber refresh", job_code, env)
+                                            try:
+                                                xml_bytes = _get_initial_page(session, initial_url, auth, 
+                                                                            maxpagesize=maxpagesize, use_initial_load=True)
+                                                rows, _, _, pk_cols_refresh, skip_token_refresh = _parse_feed(xml_bytes)
+                                                
+                                                if not pk_cols_current and pk_cols_refresh:
+                                                    pk_cols_current = pk_cols_refresh
+                                                    maybe_persist_pk(pk_cols_current)
+                                                
+                                                if rows:
+                                                    _schema_sync(ch, db, table, rows, pk_cols=pk_cols_current or None)
+                                                    _insert_rows(ch, db, table, env, rows, batch_id, batch_row_count=len(rows), 
+                                                               pk_cols=pk_cols_current or None)
+                                                    LOGGER.info("Job %s env %s inserted %d refresh rows (trigger batch)", job_code, env, len(rows))
+                                                
+                                                # Mark as complete and set timestamp to wait 10 minutes
+                                                # Ignore skip tokens - we only want 1 batch to trigger subscriber
+                                                _set_skip_token(pg, job_code, env, None)
+                                                _set_initial_completed_at(pg, job_code, env, datetime.now())
+                                                initial_done = True
+                                                
+                                                LOGGER.info("Job %s env %s subscriber triggered, will wait 10 minutes before fetching new delta token", 
+                                                           job_code, env)
+                                                
+                                                # Note: Don't fetch delta token yet - let STEP 2 handle it after 10-minute wait
+                                                # The next run will check elapsed time and fetch delta token when ready
+                                            except Exception:
+                                                LOGGER.exception("Job %s env %s failed to refresh subscriber", job_code, env)
+                                                raise
+                                        else:
+                                            # Normal delta pull succeeded - process the data
                                             if not pk_cols_current:
                                                 if pk_cols_d:
                                                     pk_cols_current = pk_cols_d
@@ -1121,9 +1176,6 @@ with DAG(
                                                         LOGGER.info("Job %s env %s updated delta token: %s", job_code, env, new_delta_token)
                                                 except Exception:
                                                     LOGGER.exception("Job %s env %s failed to fetch new delta token", job_code, env)
-                                        except Exception:
-                                            LOGGER.exception("Job %s env %s delta pull error", job_code, env)
-                                            raise
                                     else:
                                         LOGGER.warning("Job %s env %s no delta token available", job_code, env)
 

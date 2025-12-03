@@ -320,15 +320,15 @@ def _upsert_rows_pg(
     select_proj = _build_projection_with_casts(columns, pg_type_by_col)
     select_csv = ", ".join(select_proj)
     
-    # Build DISTINCT ON and ORDER BY - they must match
-    distinct_on_cols = list(conflict_cols)
+    # Build DISTINCT ON and ORDER BY
+    # DISTINCT ON uses only conflict columns (PK)
+    # ORDER BY uses conflict columns + version column DESC to keep newest
+    distinct_on_csv = ", ".join(f'v."{c}"' for c in conflict_cols)
     order_by_parts = [f'v."{c}"' for c in conflict_cols]
     
     if version_col and version_col in columns and version_col not in conflict_cols:
-        distinct_on_cols.append(version_col)
         order_by_parts.append(f'v."{version_col}" DESC NULLS LAST')
     
-    distinct_on_csv = ", ".join(f'v."{c}"' for c in distinct_on_cols)
     order_by = ", ".join(order_by_parts) if order_by_parts else "1"
     
     set_list = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in columns if c not in conflict_cols)

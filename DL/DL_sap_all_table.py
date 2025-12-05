@@ -888,8 +888,10 @@ with DAG(
                         next_run = _compute_next_run(stype, interval_minutes, cron_expr, last_run)
                         _update_env_runtime(pg, job_code, env, "success", None, last_run, next_run,
                                             next_skip=0, initial_done=initial_done)
-                        _set_delta_token(pg, job_code, env, None)
-                        _set_skip_token(pg, job_code, env, None)
+                        # Only clear tokens if weekly_refresh is complete (initial_done=True)
+                        if initial_done:
+                            _set_delta_token(pg, job_code, env, None)
+                            _set_skip_token(pg, job_code, env, None)
                         LOGGER.info("Job %s env %s completed weekly_refresh | initial_done=%s next_run=%s",
                                     job_code, env, initial_done, next_run)
 
@@ -1005,16 +1007,16 @@ with DAG(
                                 except Exception:
                                     LOGGER.exception("Job %s env %s failed to fetch initial delta token", job_code, env)
                                 
-                                # Wait 10 minutes for parsing
-                                LOGGER.info("Job %s env %s waiting 10 minutes for SAP parsing completion", job_code, env)
+                                # Wait 20 minutes for parsing
+                                LOGGER.info("Job %s env %s waiting 20 minutes for SAP parsing completion", job_code, env)
                         
-                        # STEP 3: Check if we can do delta pull (10 minutes passed)
+                        # STEP 3: Check if we can do delta pull (20 minutes passed)
                         if initial_done:
                             initial_completed = _get_initial_completed_at(pg, job_code, env)
                             if initial_completed:
                                 elapsed = (now - initial_completed).total_seconds() / 60.0
-                                if elapsed < 10:
-                                    LOGGER.info("Job %s env %s waiting for parsing: %.1f/10 min elapsed", 
+                                if elapsed < 20:
+                                    LOGGER.info("Job %s env %s waiting for parsing: %.1f/20 min elapsed", 
                                                job_code, env, elapsed)
                                     # Update runtime and exit
                                     last_run = now
@@ -1118,13 +1120,13 @@ with DAG(
                                                                pk_cols=pk_cols_current or None)
                                                     LOGGER.info("Job %s env %s inserted %d refresh rows (trigger batch)", job_code, env, len(rows))
                                                 
-                                                # Mark as complete and set timestamp to wait 10 minutes
+                                                # Mark as complete and set timestamp to wait 20 minutes
                                                 # Ignore skip tokens - we only want 1 batch to trigger subscriber
                                                 _set_skip_token(pg, job_code, env, None)
                                                 _set_initial_completed_at(pg, job_code, env, datetime.now())
                                                 initial_done = True
                                                 
-                                                LOGGER.info("Job %s env %s subscriber triggered, will wait 10 minutes before fetching new delta token", 
+                                                LOGGER.info("Job %s env %s subscriber triggered, will wait 20 minutes before fetching new delta token", 
                                                            job_code, env)
                                                 
                                                 # Note: Don't fetch delta token yet - let STEP 2 handle it after 10-minute wait

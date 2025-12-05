@@ -211,6 +211,48 @@ def _set_initial_completed_at(pg: PostgresHook, job_code: str, env: str, dt: dat
     state[col] = dt.isoformat()
     _save_state(pg, job_code, state)
 
+def _get_last_weekly_start(pg: PostgresHook, job_code: str, env: str) -> Optional[datetime]:
+    """Get last weekly refresh start timestamp"""
+    col = f"{env.lower()}_last_weekly_start"
+    rows = fetch_dicts(pg, f"SELECT state_json FROM {REGISTRY_TABLE} WHERE job_code=%s", (job_code,))
+    if not rows: return None
+    state = rows[0].get("state_json") or {}
+    if isinstance(state, str):
+        try:
+            state = json.loads(state)
+        except Exception:
+            return None
+    ts = state.get(col)
+    if ts:
+        try:
+            return datetime.fromisoformat(ts) if isinstance(ts, str) else ts
+        except Exception:
+            return None
+    return None
+
+def _set_last_weekly_start(pg: PostgresHook, job_code: str, env: str, dt: datetime):
+    """Store last weekly refresh start timestamp"""
+    state = _load_state(pg, job_code)
+    col = f"{env.lower()}_last_weekly_start"
+    state[col] = dt.isoformat()
+    _save_state(pg, job_code, state)
+
+def _should_start_new_weekly_cycle(now: datetime, last_weekly_start: Optional[datetime]) -> bool:
+    """Check if we should start a new weekly cycle (Sunday 00:00 WIB)"""
+    # If never started, start now
+    if last_weekly_start is None:
+        return True
+    
+    # Get current week's Sunday 00:00
+    days_since_sunday = now.weekday() + 1 if now.weekday() != 6 else 0  # Monday=0, Sunday=6
+    current_week_sunday = (now - timedelta(days=days_since_sunday)).replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # If last start was before this week's Sunday, start new cycle
+    if last_weekly_start < current_week_sunday:
+        return True
+    
+    return False
+
 def _get_delta_links_path(entity_name: str) -> str:
     """Generate DeltaLinksOf path from entity name"""
     # From FactsOfZCDCAFIH -> DeltaLinksOfFactsOfZCDCAFIH
@@ -809,16 +851,34 @@ with DAG(
             with phase_logger(log_hook, f"{job_code}:{env}:run", batch_id, db, table):
                 try:
                     if method == "weekly_refresh":
-                        with phase_logger(log_hook, f"{job_code}:{env}:truncate", batch_id, db, table):
-                            ck_exec(ch, f"CREATE DATABASE IF NOT EXISTS {db}")
-                            ck_exec(ch, f"TRUNCATE TABLE IF EXISTS {db}.{table}")
-                            LOGGER.info("Job %s env %s truncated %s.%s", job_code, env, db, table)
-                        next_skip = 0
-                        initial_done = False
+                        # Check if we should start a new weekly cycle (Sunday 00:00 WIB)
+                        last_weekly_start = _get_last_weekly_start(pg, job_code, env)
+                        should_start_new_cycle = _should_start_new_weekly_cycle(now, last_weekly_start)
+                        
+                        # Check if we have a stored skip token from previous run
+                        stored_skip_token = _get_skip_token(pg, job_code, env)
+                        
+                        # Truncate if: (1) starting new weekly cycle OR (2) no skip token (fresh start)
+                        if should_start_new_cycle or not stored_skip_token:
+                            with phase_logger(log_hook, f"{job_code}:{env}:truncate", batch_id, db, table):
+                                ck_exec(ch, f"CREATE DATABASE IF NOT EXISTS {db}")
+                                ck_exec(ch, f"TRUNCATE TABLE IF EXISTS {db}.{table}")
+                                if should_start_new_cycle:
+                                    LOGGER.info("Job %s env %s truncated %s.%s (new weekly cycle - Sunday 00:00 WIB)", 
+                                               job_code, env, db, table)
+                                    _set_last_weekly_start(pg, job_code, env, now)
+                                    # Clear skip token to force fresh start
+                                    _set_skip_token(pg, job_code, env, None)
+                                    stored_skip_token = None
+                                else:
+                                    LOGGER.info("Job %s env %s truncated %s.%s (starting fresh weekly refresh)", 
+                                               job_code, env, db, table)
+                            next_skip = 0
+                            initial_done = False
+                        else:
+                            LOGGER.info("Job %s env %s continuing weekly refresh with skiptoken (no truncate)", job_code, env)
 
                         with phase_logger(log_hook, f"{job_code}:{env}:initial", batch_id, db, table):
-                            # Check if we have a stored skip token from previous run
-                            stored_skip_token = _get_skip_token(pg, job_code, env)
                             use_initial_load = (stored_skip_token is None)
                             page_count = 0
                             

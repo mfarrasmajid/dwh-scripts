@@ -858,24 +858,31 @@ with DAG(
                         # Check if we have a stored skip token from previous run
                         stored_skip_token = _get_skip_token(pg, job_code, env)
                         
-                        # Truncate if: (1) starting new weekly cycle OR (2) no skip token (fresh start)
-                        if should_start_new_cycle or not stored_skip_token:
+                        # Truncate ONLY if starting new weekly cycle (Sunday 00:00 WIB)
+                        if should_start_new_cycle:
                             with phase_logger(log_hook, f"{job_code}:{env}:truncate", batch_id, db, table):
                                 ck_exec(ch, f"CREATE DATABASE IF NOT EXISTS {db}")
                                 ck_exec(ch, f"TRUNCATE TABLE IF EXISTS {db}.{table}")
-                                if should_start_new_cycle:
-                                    LOGGER.info("Job %s env %s truncated %s.%s (new weekly cycle - Sunday 00:00 WIB)", 
-                                               job_code, env, db, table)
-                                    _set_last_weekly_start(pg, job_code, env, now)
-                                    # Clear skip token to force fresh start
-                                    _set_skip_token(pg, job_code, env, None)
-                                    stored_skip_token = None
-                                else:
-                                    LOGGER.info("Job %s env %s truncated %s.%s (starting fresh weekly refresh)", 
-                                               job_code, env, db, table)
+                                LOGGER.info("Job %s env %s truncated %s.%s (new weekly cycle - Sunday 00:00 WIB)", 
+                                           job_code, env, db, table)
+                                _set_last_weekly_start(pg, job_code, env, now)
+                                # Clear skip token to force fresh start
+                                _set_skip_token(pg, job_code, env, None)
+                                stored_skip_token = None
                             next_skip = 0
                             initial_done = False
-                        else:
+                        
+                        # If no skip token (cycle completed), wait for next Sunday to truncate
+                        if not stored_skip_token and not should_start_new_cycle:
+                            LOGGER.info("Job %s env %s weekly refresh cycle completed, waiting for next Sunday to restart", job_code, env)
+                            # Update runtime and skip this run
+                            last_run = now
+                            next_run = _compute_next_run(stype, interval_minutes, cron_expr, last_run)
+                            _update_env_runtime(pg, job_code, env, "success", None, last_run, next_run,
+                                               next_skip=0, initial_done=True)
+                            continue
+                        
+                        if stored_skip_token:
                             LOGGER.info("Job %s env %s continuing weekly refresh with skiptoken (no truncate)", job_code, env)
 
                         with phase_logger(log_hook, f"{job_code}:{env}:initial", batch_id, db, table):

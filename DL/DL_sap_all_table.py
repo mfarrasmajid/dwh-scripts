@@ -965,10 +965,8 @@ with DAG(
                     else:
                         # continuous_cdc - NEW IMPLEMENTATION
                         if force_initial:
-                            with phase_logger(log_hook, f"{job_code}:{env}:truncate", batch_id, db, table):
-                                ck_exec(ch, f"CREATE DATABASE IF NOT EXISTS {db}")
-                                ck_exec(ch, f"TRUNCATE TABLE IF EXISTS {db}.{table}")
-                                LOGGER.info("Job %s env %s forced truncate %s.%s", job_code, env, db, table)
+                            # Clear CDC state without truncating table
+                            LOGGER.info("Job %s env %s force_initial: clearing CDC state (no truncate)", job_code, env)
                             next_skip = 0
                             initial_done = False
                             _set_delta_token(pg, job_code, env, None)

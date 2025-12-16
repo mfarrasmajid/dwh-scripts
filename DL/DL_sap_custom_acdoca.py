@@ -170,7 +170,7 @@ with DAG(
             LOGGER.info(f"Database {TARGET_DB} ensured")
             
             # Create table with ReplacingMergeTree engine
-            # Primary key is (BELNR, GJAHR, AUFNR)
+            # Primary key is DOCLN
             create_sql = f"""
             CREATE TABLE IF NOT EXISTS {TARGET_DB}.{TARGET_TABLE} (
                 BELNR String,
@@ -180,7 +180,7 @@ with DAG(
                 _updated_at DateTime DEFAULT now()
             )
             ENGINE = ReplacingMergeTree(_updated_at)
-            ORDER BY (BELNR, GJAHR, AUFNR)
+            ORDER BY (BELNR, GJAHR, AUFNR, DOCLN)
             PARTITION BY toYYYYMM(_updated_at)
             SETTINGS index_granularity = 8192
             """
@@ -371,16 +371,26 @@ with DAG(
         ch = ClickHouseHook(clickhouse_conn_id=CLICKHOUSE_CONN_ID)
         
         with phase_logger(log_hook, f"{DAG_ID}:insert_ch", mark, TARGET_DB, TARGET_TABLE):
-            # Prepare data for insert
+            # Prepare data for insert (exclude records where AUFNR is empty)
             insert_data = []
+            filtered_count = 0
             for result in results:
+                aufnr = result.get("AUFNR", '')
+                # Skip records where AUFNR is empty string
+                if aufnr == '':
+                    filtered_count += 1
+                    continue
+                    
                 insert_data.append({
                     "BELNR": result["BELNR"],
                     "GJAHR": result["GJAHR"],
-                    "AUFNR": result.get("AUFNR", ''),
+                    "AUFNR": aufnr,
                     "DOCLN": result.get("DOCLN", ''),
                     "_updated_at": datetime.now()
                 })
+            
+            if filtered_count > 0:
+                LOGGER.info(f"Filtered out {filtered_count} records with empty AUFNR")
             
             # Insert into ClickHouse (ReplacingMergeTree automatically replaces old records by BELNR, GJAHR)
             insert_sql = f"""
@@ -394,8 +404,7 @@ with DAG(
             LOGGER.info(f"Inserted {len(insert_data)} records into {TARGET_DB}.{TARGET_TABLE}")
             
             # Log success with details
-            aufnr_found = sum(1 for r in results if r.get("AUFNR"))
-            msg = f"Inserted {len(results)} records: {aufnr_found} with AUFNR, {len(results) - aufnr_found} without"
+            msg = f"Inserted {len(insert_data)} records (filtered {filtered_count} records with empty AUFNR)"
             _log_status(log_hook, f"{DAG_ID}:insert_ch", mark, "success",
                        TARGET_DB, TARGET_TABLE, error_message=msg)
 

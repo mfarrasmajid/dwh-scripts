@@ -10,6 +10,8 @@ from lxml import etree
 from requests.auth import HTTPBasicAuth
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow_clickhouse_plugin.hooks.clickhouse import ClickHouseHook
+import gzip
+import shutil
 import urllib.parse
 from airflow.models import Variable
 
@@ -162,15 +164,29 @@ def fetch_sap_cdc_initial(**kwargs):
         else:
             next_url = BASE_URL + '&InitialLoad=true'
 
-        response = requests.get(next_url, headers=HEADERS, auth=HTTPBasicAuth(USERNAME, PASSWORD))
+        response = requests.get(next_url, headers=HEADERS, auth=HTTPBasicAuth(USERNAME, PASSWORD), stream=True)
         if response.status_code != 200:
             raise Exception(f"Initial fetch failed: {response.text}")
 
-        file_path = os.path.join(XML_DIR, 'batch_0.xml')
-        with open(file_path, 'wb') as f:
-            f.write(response.content)
+        # Save compressed data to .gz file
+        gz_file_path = os.path.join(XML_DIR, 'batch_0.xml.gz')
+        with open(gz_file_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
 
-        root = etree.fromstring(response.content)
+        # Decompress the .gz file to .xml file
+        file_path = os.path.join(XML_DIR, 'batch_0.xml')
+        with gzip.open(gz_file_path, 'rb') as f_in:
+            with open(file_path, 'wb') as f_out:
+                shutil.copyfileobj(f_in, f_out)
+
+        # Remove the .gz file after decompression
+        os.remove(gz_file_path)
+
+        # Parse the decompressed XML file
+        with open(file_path, 'rb') as f:
+            root = etree.parse(f).getroot()
         ns = {'atom': 'http://www.w3.org/2005/Atom'}
         next_link_el = root.find("atom:link[@rel='next']", namespaces=ns)
         if next_link_el is not None:
@@ -207,10 +223,24 @@ def store_initial_delta_link(**kwargs):
         log_status(process_name, random_value, "success")
     else:
         try:
-            response = requests.get(DELTA_DISCOVERY_URL, headers=HEADERS, auth=HTTPBasicAuth(USERNAME, PASSWORD))
+            response = requests.get(DELTA_DISCOVERY_URL, headers=HEADERS, auth=HTTPBasicAuth(USERNAME, PASSWORD), stream=True)
             response.raise_for_status()
 
-            root = etree.fromstring(response.content)
+            # Read and decompress response content efficiently
+            chunks = []
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    chunks.append(chunk)
+            content = b''.join(chunks)
+            
+            # Decompress if needed
+            try:
+                content = gzip.decompress(content)
+            except gzip.BadGzipFile:
+                # Content is not compressed or already decompressed
+                pass
+
+            root = etree.fromstring(content)
 
             # Use namespaces for accurate XML parsing
             ns = {
@@ -268,14 +298,28 @@ def fetch_sap_delta(**kwargs):
 
         idx = 0
         while url:
-            response = requests.get(url, headers=HEADERS, auth=HTTPBasicAuth(USERNAME, PASSWORD))
+            response = requests.get(url, headers=HEADERS, auth=HTTPBasicAuth(USERNAME, PASSWORD), stream=True)
             response.raise_for_status()
 
-            file_path = os.path.join(XML_DIR, f'delta_{idx}.xml')
-            with open(file_path, 'wb') as f:
-                f.write(response.content)
+            # Save compressed data to .gz file
+            gz_file_path = os.path.join(XML_DIR, f'delta_{idx}.xml.gz')
+            with open(gz_file_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
 
-            root = etree.fromstring(response.content)
+            # Decompress the .gz file to .xml file
+            file_path = os.path.join(XML_DIR, f'delta_{idx}.xml')
+            with gzip.open(gz_file_path, 'rb') as f_in:
+                with open(file_path, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+
+            # Remove the .gz file after decompression
+            os.remove(gz_file_path)
+
+            # Parse the decompressed XML file
+            with open(file_path, 'rb') as f:
+                root = etree.parse(f).getroot()
             ns = {'atom': 'http://www.w3.org/2005/Atom'}
             next_link = root.find("atom:link[@rel='delta']", namespaces=ns)
             if next_link is not None:
